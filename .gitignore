@@ -4,10 +4,11 @@ backend/__pycache__/
 *.pyc
 
 # OAuth
-backend/auth/token.pickle
-backend/auth/client_secret.json
+token.pickle
+client_secret.json
 
 # Database
+queue.db
 *.db
 
 # Output
