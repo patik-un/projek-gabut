@@ -1,0 +1,29 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+*.pyc
+
+# OAuth
+backend/auth/token.pickle
+backend/auth/client_secret.json
+
+# Database
+*.db
+
+# Output
+processed/
+output/
+backend/processed/
+backend/output/
+
+# Node
+frontend/node_modules/
+
+# Tauri
+frontend/src-tauri/target/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
