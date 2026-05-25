@@ -2,14 +2,39 @@ import cv2
 import time
 import os
 import uuid
+import sys
 
-OUTPUT_FOLDER = "output"
+BASE_DIR = os.path.abspath(
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        ".."
+    )
+)
+
+OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
+
 last_capture = 0
+
+# =========================
+# GLOBAL FRAME
+# =========================
+latest_frame = None
+
+# =========================
+# GLOBAL CAMERA
+# =========================
+camera = None
+
+
+def get_latest_frame():
+    return latest_frame
 
 
 def start_camera():
 
     global last_capture
+    global latest_frame
+    global camera
 
     print("📸 start_camera dipanggil")
 
@@ -17,51 +42,78 @@ def start_camera():
 
     print("📂 Folder output siap")
 
-    # buka kamera MacBook
-    cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+    # =========================
+    # OPEN CAMERA
+    # =========================
+    if sys.platform == "win32":
+        camera_backend = cv2.CAP_DSHOW
+    elif sys.platform == "darwin":
+        camera_backend = cv2.CAP_AVFOUNDATION
+    else:
+        camera_backend = cv2.CAP_ANY
+
+    camera = cv2.VideoCapture(
+        2,
+        camera_backend
+    )
 
     print("🎥 Mencoba membuka kamera...")
 
-    if not cap.isOpened():
+    if not camera.isOpened():
         print("❌ Camera gagal dibuka")
-        cap.release()
+        camera.release()
         return
 
     print("✅ Camera berhasil dibuka")
     print("SPACE = Capture")
     print("Q = Quit")
 
-    while True:
+    try:
+        while True:
 
-        ret, frame = cap.read()
+            ret, frame = camera.read()
 
-        if not ret:
-            print("❌ Gagal membaca frame")
-            break
+            if not ret:
+                print("❌ Gagal membaca frame")
+                break
 
-        cv2.imshow("MacBook Camera", frame)
+            # =========================
+            # SAVE GLOBAL FRAME
+            # =========================
+            latest_frame = frame.copy()
 
-        key = cv2.waitKey(1)
+            # =========================
+            # REMOVE OPENCV WINDOW
+            # =========================
+            # cv2.imshow("MacBook Camera", frame)
 
-        # SPACE key
-        if key == 32:
+            key = cv2.waitKey(1)
 
-            now = time.time()
+            # =========================
+            # SPACE = CAPTURE
+            # =========================
+            if key == 32:
 
-            # debounce capture (anti spam)
-            if now - last_capture < 1:
-                continue
+                now = time.time()
 
-            last_capture = now
+                # debounce
+                if now - last_capture < 1:
+                    continue
 
-            filename = f"{OUTPUT_FOLDER}/capture_{uuid.uuid4()}.jpg"
+                last_capture = now
 
-            cv2.imwrite(filename, frame)
+                filename = os.path.join(
+                    OUTPUT_FOLDER,
+                    f"capture_{uuid.uuid4()}.jpg"
+                )
 
-            print(f"✅ Foto disimpan: {filename}")
+                cv2.imwrite(filename, frame)
 
-        elif key == ord('q'):
-            break
+                print(f"✅ Foto disimpan: {filename}")
 
-    cap.release()
-    cv2.destroyAllWindows()
+            elif key == ord('q'):
+                break
+
+    finally:
+        camera.release()
+        cv2.destroyAllWindows()

@@ -1,0 +1,28 @@
+{
+  "landscape": {
+    "fit": "manual",
+    "position": "bottom-center",
+    "scale": 49,
+    "rotation": 0,
+    "opacity": 100,
+    "frame_scale": 100,
+    "frame_x": 0,
+    "frame_y": 0,
+    "photo_scale": 100,
+    "photo_x": 0,
+    "photo_y": 0
+  },
+  "portrait": {
+    "fit": "manual",
+    "position": "top-center",
+    "scale": 49,
+    "rotation": 0,
+    "opacity": 100,
+    "frame_scale": 100,
+    "frame_x": 0,
+    "frame_y": 0,
+    "photo_scale": 100,
+    "photo_x": 0,
+    "photo_y": 0
+  }
+}

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSCameraUsageDescription</key>
+    <string>Aplikasi membutuhkan akses kamera untuk live preview dan capture photobooth.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Aplikasi membutuhkan akses ke Apple Events untuk membuka dialog pilih folder.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Aplikasi membutuhkan akses ke folder Desktop untuk menyimpan dan mengupload file.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Aplikasi membutuhkan akses ke folder Documents untuk menyimpan file.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Aplikasi membutuhkan akses ke folder Downloads untuk menyimpan file.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>Aplikasi membutuhkan akses jaringan untuk upload ke Google Drive.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Aplikasi membutuhkan akses ke volume eksternal untuk membaca file foto.</string>
+</dict>
+</plist>

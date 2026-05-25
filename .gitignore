@@ -1,30 +1,50 @@
 # Python
 backend/.venv/
-backend/__pycache__/
+__pycache__/
 *.pyc
 
 # OAuth
 token.pickle
 client_secret.json
+backend/auth/token.pickle
 
 # Database
 queue.db
 *.db
+
+# PyInstaller
+backend/dist/
+backend/build/
+backend/*.spec
 
 # Output
 processed/
 output/
 backend/processed/
 backend/output/
+backend/photobooth_strips/
 
 # Node
 frontend/node_modules/
 
 # Tauri
 frontend/src-tauri/target/
+frontend/src-tauri/backend/
+frontend/src-tauri/backend-bin/
+frontend/src-tauri/backend-source/
+frontend/src-tauri/output/
+frontend/src-tauri/processed/
+frontend/src-tauri/photobooth_strips/
 
 # macOS
 .DS_Store
 
 # Logs
 *.log
+
+# IDE
+.continue/
+.idea/
+.vscode/
+*.swp
+*.swo
