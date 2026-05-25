@@ -31,6 +31,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Show build tools
+        shell: pwsh
+        run: |
+          python --version
+          node --version
+          npm --version
+          rustc --version
+          cargo --version
+
       - name: Create backend virtual environment
         shell: pwsh
         run: |
@@ -44,11 +53,27 @@ jobs:
 
       - name: Build Windows installer
         working-directory: frontend
-        run: npm run tauri build -- --bundles nsis
+        shell: pwsh
+        run: |
+          npm run tauri build -- --bundles nsis 2>&1 | Tee-Object -FilePath windows-build.log
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: event-booth-studio-windows-installer
-          path: frontend/src-tauri/target/release/bundle/nsis/*.exe
+          path: frontend/src-tauri/target/release/bundle/nsis/**/*.exe
           if-no-files-found: error
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: event-booth-studio-windows-build-logs
+          path: |
+            frontend/windows-build.log
+            frontend/src-tauri/target/pyinstaller-build/**/warn-*.txt
+            frontend/src-tauri/target/pyinstaller-build/**/*.html
+          if-no-files-found: ignore
