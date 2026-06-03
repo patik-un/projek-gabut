@@ -31,6 +31,7 @@ frontend/node_modules/
 frontend/src-tauri/target/
 frontend/src-tauri/backend/
 frontend/src-tauri/backend-bin/
+frontend/src-tauri/backend-seed/
 frontend/src-tauri/backend-source/
 frontend/src-tauri/output/
 frontend/src-tauri/processed/

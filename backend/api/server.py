@@ -28,10 +28,13 @@ from fastapi.staticfiles import StaticFiles
 
 from process.process import (
     DEFAULT_WATERMARK_PROFILES,
+    OUTPUT_SETTINGS_FILE,
     WATERMARK_FILES,
     WATERMARK_SETTINGS_FILE,
     get_next_id,
+    load_output_settings,
     normalize_watermark_profiles,
+    write_output_settings,
 )
 from queue_db import (
     DB_FILE,
@@ -240,17 +243,101 @@ init_db()
 
 def public_url(path):
     filename = os.path.basename(path)
+    api_port = os.environ.get("EVENT_BOOTH_BACKEND_PORT", "8000")
+    base_url = f"http://127.0.0.1:{api_port}"
 
     if path.startswith(WATERMARK_DIR):
-        return f"http://127.0.0.1:8000/watermark-files/{filename}"
+        return f"{base_url}/watermark-files/{filename}"
 
     if path.startswith(PHOTOBOOTH_STRIP_DIR):
-        return f"http://127.0.0.1:8000/photobooth-strips/{filename}"
+        return f"{base_url}/photobooth-strips/{filename}"
 
     if path.startswith(PROCESSED_DIR):
-        return f"http://127.0.0.1:8000/processed/{filename}"
+        return f"{base_url}/processed/{filename}"
 
-    return f"http://127.0.0.1:8000/output/{filename}"
+    return f"{base_url}/output/{filename}"
+
+
+def startup_check_item(name, status, message, repair=None, required=False):
+    return {
+        "name": name,
+        "status": status,
+        "message": message,
+        "repair": repair,
+        "required": required
+    }
+
+
+def check_directory_ready(path, label):
+    try:
+        os.makedirs(path, exist_ok=True)
+        test_path = os.path.join(path, ".startup_check")
+        with open(test_path, "w") as file:
+            file.write("ok")
+        os.remove(test_path)
+        return startup_check_item(
+            label,
+            "ok",
+            "Folder siap dipakai",
+            required=True
+        )
+    except OSError as error:
+        return startup_check_item(
+            label,
+            "error",
+            f"Folder tidak bisa ditulis: {error}",
+            "Cek permission folder data backend atau jalankan ulang aplikasi.",
+            required=True
+        )
+
+
+def check_json_file(path, label, optional=True):
+    if not os.path.exists(path):
+        return startup_check_item(
+            label,
+            "warning" if optional else "error",
+            "File belum ada, app akan memakai default.",
+            "Buka admin panel lalu simpan ulang pengaturan.",
+            required=not optional
+        )
+
+    try:
+        with open(path, "r") as file:
+            json.load(file)
+        return startup_check_item(label, "ok", "File konfigurasi valid")
+    except (OSError, json.JSONDecodeError) as error:
+        return startup_check_item(
+            label,
+            "error" if not optional else "warning",
+            f"File konfigurasi rusak: {error}",
+            "Simpan ulang pengaturan dari admin panel. Jika masih gagal, pindahkan file rusak sebagai backup lalu restart app.",
+            required=not optional
+        )
+
+
+def check_image_file(path, label, optional=True):
+    if not os.path.exists(path):
+        return startup_check_item(
+            label,
+            "warning" if optional else "error",
+            "File belum ada, app akan memakai default.",
+            "Upload ulang file dari admin panel bila diperlukan.",
+            required=not optional
+        )
+
+    try:
+        image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if image is None or image.size == 0:
+            raise ValueError("gambar tidak bisa dibaca")
+        return startup_check_item(label, "ok", "File gambar valid")
+    except Exception as error:
+        return startup_check_item(
+            label,
+            "warning" if optional else "error",
+            f"File gambar rusak: {error}",
+            "Upload ulang file dari admin panel. App akan memakai default sampai file diganti.",
+            required=not optional
+        )
 
 
 def decode_base64_image(data_base64):
@@ -310,6 +397,15 @@ def write_watermark_settings(settings):
         json.dump(normalized, file, indent=2)
 
     return normalized
+
+
+def output_settings_response():
+    settings = load_output_settings()
+
+    return {
+        **settings,
+        "configured": os.path.exists(OUTPUT_SETTINGS_FILE)
+    }
 
 
 def safe_filename(filename, fallback="upload.jpg"):
@@ -381,6 +477,46 @@ def root():
 
     return {
         "status": "running"
+    }
+
+
+@app.get("/startup/checks")
+def startup_checks():
+    checks = [
+        check_directory_ready(OUTPUT_DIR, "Capture output"),
+        check_directory_ready(PROCESSED_DIR, "Processed output"),
+        check_directory_ready(WATERMARK_DIR, "Watermark assets"),
+        check_directory_ready(PHOTOBOOTH_STRIP_DIR, "Photobooth strips"),
+        check_directory_ready(MANUAL_UPLOAD_DIR, "Manual upload cache"),
+        check_json_file(WATERMARK_SETTINGS_FILE, "Watermark settings"),
+        check_json_file(OUTPUT_SETTINGS_FILE, "Output settings", optional=True),
+        check_json_file(os.path.join(BACKEND_DIR, "database", "auto_watch.json"), "Auto watch settings"),
+    ]
+
+    for orientation, path in WATERMARK_FILES.items():
+        checks.append(
+            check_image_file(path, f"Watermark {orientation}", optional=True)
+        )
+
+    for slot_count, path in PHOTOBOOTH_TEMPLATE_FILES.items():
+        checks.append(
+            check_image_file(path, f"Template photobooth {slot_count} slot", optional=True)
+        )
+
+    error_count = sum(1 for item in checks if item["status"] == "error")
+    warning_count = sum(1 for item in checks if item["status"] == "warning")
+    blocking_count = sum(
+        1
+        for item in checks
+        if item["status"] == "error" and item["required"]
+    )
+
+    return {
+        "success": blocking_count == 0,
+        "can_continue": blocking_count == 0,
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "checks": checks
     }
 
 
@@ -544,13 +680,8 @@ def latest_capture():
         key=os.path.getmtime
     )
 
-    filename = os.path.basename(
-        latest_file
-    )
-
     return {
-        "image_url":
-            f"http://127.0.0.1:8000/output/{filename}"
+        "image_url": public_url(latest_file)
     }
 
 
@@ -564,7 +695,7 @@ def get_captures():
         data.append({
             "id": filename,
             "filename": filename,
-            "image_url": f"http://127.0.0.1:8000/output/{filename}",
+            "image_url": public_url(file_path),
             "created_at": os.path.getmtime(file_path),
             "slot": index + 1
         })
@@ -573,12 +704,29 @@ def get_captures():
 
 
 @app.post("/photobooth/session/start")
-def start_photobooth_session():
+async def start_photobooth_session(request: Request):
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body) if raw_body else {}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        payload = {}
+    drive_folder_id = (payload.get("drive_folder_id") or "").strip()
+
+    if not drive_folder_id:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "Drive Awal Photobooth wajib diisi di admin panel"
+            }
+        )
+
     deleted = clear_capture_files()
 
     return {
         "success": True,
-        "deleted": deleted
+        "deleted": deleted,
+        "drive_folder_id": drive_folder_id
     }
 
 
@@ -615,9 +763,51 @@ def get_watermark():
     }
 
 
+@app.get("/output-settings")
+def get_output_settings():
+    return {
+        "success": True,
+        "settings": output_settings_response()
+    }
+
+
+@app.post("/output-settings")
+async def save_output_settings(request: Request):
+    payload = await request.json()
+    settings = payload.get("settings") or payload
+
+    try:
+        normalized = write_output_settings(settings)
+    except OSError as error:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": f"Gagal menyimpan setting output: {error}"
+            }
+        )
+
+    return {
+        "success": True,
+        "settings": {
+            **normalized,
+            "configured": True
+        }
+    }
+
+
 @app.post("/watermark")
 async def upload_watermark(request: Request):
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "Payload upload watermark harus JSON"
+            }
+        )
     orientation = payload.get("orientation", "landscape")
 
     if orientation not in WATERMARK_FILES:
@@ -887,7 +1077,16 @@ def get_photobooth_template():
 
 @app.post("/photobooth/template")
 async def upload_photobooth_template(request: Request):
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "Payload upload template harus JSON"
+            }
+        )
 
     upload_id = uuid.uuid4().hex
     temp_template_file = os.path.join(
@@ -958,6 +1157,15 @@ async def upload_photobooth_drive(request: Request):
     email = (payload.get("email") or "").strip()
     filename = payload.get("filename") or "photobooth-strip.jpg"
     parent_drive_folder_id = (payload.get("parent_drive_folder_id") or "").strip() or None
+    if not parent_drive_folder_id:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "Drive Awal Photobooth wajib diisi sebelum upload"
+            }
+        )
+
     folder_name = (payload.get("folder_name") or "").strip()
     if not folder_name:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -1064,9 +1272,17 @@ def get_printers_unix():
 
     if ":" in default_line:
         default_printer = default_line.split(":", 1)[1].strip() or None
+    elif default_line.lower().startswith("system default destination:"):
+        default_printer = default_line.split(":", 1)[1].strip() or None
+
+    if default_printer and not any(printer["name"] == default_printer for printer in printers):
+        printers.insert(0, {
+            "name": default_printer,
+            "status": "default",
+        })
 
     return {
-        "success": printers_output.returncode == 0,
+        "success": printers_output.returncode == 0 or bool(printers),
         "printers": printers,
         "default_printer": default_printer,
         "message": printers_output.stderr.strip() if printers_output.returncode != 0 else "",
@@ -1123,6 +1339,9 @@ def get_printers_windows():
 async def print_photobooth_strip(request: Request):
     payload = await request.json()
     printer_name = str(payload.get("printer_name") or "").strip()
+    paper_size = str(payload.get("paper_size") or "4r").strip().lower()
+    if paper_size not in ("3r", "4r"):
+        paper_size = "4r"
     filename = safe_filename(payload.get("filename"), "photobooth-strip.jpg")
     print_id = uuid.uuid4().hex
     print_file = os.path.join(
@@ -1151,9 +1370,9 @@ async def print_photobooth_strip(request: Request):
         )
 
     if sys.platform == "win32":
-        result = print_file_windows(printer_name, print_file)
+        result = print_file_windows(printer_name, print_file, paper_size=paper_size)
     else:
-        result = print_file_unix(printer_name, print_file)
+        result = print_file_unix(printer_name, print_file, paper_size=paper_size)
 
     if result is not None:
         return result
@@ -1161,14 +1380,30 @@ async def print_photobooth_strip(request: Request):
     return {
         "success": True,
         "printer_name": printer_name,
+        "paper_size": paper_size,
         "file": print_file,
     }
 
 
-def print_file_unix(printer_name, print_file):
+def print_file_unix(printer_name, print_file, paper_size="4r"):
+    cups_media_by_size = {
+        "3r": "Custom.3.5x5in",
+        "4r": "Custom.4x6in",
+    }
+    cups_media = cups_media_by_size.get(paper_size, cups_media_by_size["4r"])
+
     try:
         result = subprocess.run(
-            ["lpr", "-P", printer_name, print_file],
+            [
+                "lpr",
+                "-P",
+                printer_name,
+                "-o",
+                f"media={cups_media}",
+                "-o",
+                "fit-to-page",
+                print_file,
+            ],
             capture_output=True,
             text=True,
             timeout=12,
@@ -1195,7 +1430,7 @@ def print_file_unix(printer_name, print_file):
     return None
 
 
-def print_file_windows(printer_name, print_file):
+def print_file_windows(printer_name, print_file, paper_size="4r"):
     try:
         import win32api
     except ImportError:
@@ -1315,7 +1550,7 @@ def get_auto_watch_file(request: Request):
         not folder_path
         or not normalized_path.startswith(os.path.abspath(folder_path) + os.sep)
         or not os.path.isfile(normalized_path)
-        or not normalized_path.lower().endswith((".jpg", ".jpeg"))
+        or not normalized_path.lower().endswith((".jpg", ".jpeg", ".png"))
     ):
         return JSONResponse(
             status_code=404,
@@ -1565,11 +1800,11 @@ async def capture_photo(request: Request):
         payload = {}
 
     try:
-        max_captures = int(payload.get("max_photo_count") or 4)
+        max_captures = int(payload.get("max_photo_count") or 6)
     except (TypeError, ValueError):
-        max_captures = 4
+        max_captures = 6
 
-    max_captures = min(4, max(1, max_captures))
+    max_captures = min(6, max(1, max_captures))
 
     if len(current_captures) >= max_captures:
         return JSONResponse(
@@ -1606,7 +1841,7 @@ async def capture_photo(request: Request):
         return {
             "success": True,
             "filename": filename,
-            "image_url": f"http://127.0.0.1:8000/output/{filename}"
+            "image_url": public_url(output_path)
         }
 
     frame = get_frame_snapshot()
@@ -1642,7 +1877,7 @@ async def capture_photo(request: Request):
     return {
         "success": True,
         "filename": filename,
-        "image_url": f"http://127.0.0.1:8000/output/{filename}"
+        "image_url": public_url(output_path)
     }
 
 

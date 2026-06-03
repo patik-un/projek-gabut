@@ -2,6 +2,11 @@ name: Build Windows Installer
 
 on:
   workflow_dispatch:
+    inputs:
+      upload_logs:
+        description: Upload build logs
+        type: boolean
+        default: true
   push:
     branches:
       - main
@@ -51,6 +56,19 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Restore Google OAuth client secrets
+        shell: pwsh
+        env:
+          GOOGLE_CLIENT_SECRETS_JSON: ${{ secrets.GOOGLE_CLIENT_SECRETS_JSON }}
+        run: |
+          if ($env:GOOGLE_CLIENT_SECRETS_JSON) {
+            New-Item -ItemType Directory -Force backend\auth | Out-Null
+            $env:GOOGLE_CLIENT_SECRETS_JSON | Set-Content -Path backend\auth\client_secrets.json -Encoding utf8
+            Write-Host "Google OAuth client secrets restored."
+          } else {
+            Write-Host "GOOGLE_CLIENT_SECRETS_JSON is empty; Drive login will need secrets supplied another way."
+          }
+
       - name: Build Windows installer
         working-directory: frontend
         shell: pwsh
@@ -68,7 +86,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload build logs
-        if: always()
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.upload_logs) }}
         uses: actions/upload-artifact@v4
         with:
           name: event-booth-studio-windows-build-logs

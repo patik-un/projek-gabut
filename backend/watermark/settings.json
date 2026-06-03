@@ -2,7 +2,7 @@
   "landscape": {
     "fit": "manual",
     "position": "bottom-center",
-    "scale": 49,
+    "scale": 29,
     "rotation": 0,
     "opacity": 100,
     "frame_scale": 100,
@@ -14,8 +14,8 @@
   },
   "portrait": {
     "fit": "manual",
-    "position": "top-center",
-    "scale": 49,
+    "position": "bottom-center",
+    "scale": 23,
     "rotation": 0,
     "opacity": 100,
     "frame_scale": 100,

@@ -32,6 +32,7 @@ WATERMARK_SETTINGS_FILE = os.path.join(
 )
 
 COUNTER_FILE = os.path.join(BASE_DIR, "counter.txt")
+OUTPUT_SETTINGS_FILE = os.path.join(BASE_DIR, "database", "output_settings.json")
 
 counter_lock = threading.Lock()
 
@@ -44,6 +45,11 @@ MAX_SIZE = None
 JPEG_QUALITY = 100
 JPEG_SUBSAMPLING = 0
 JPEG_OPTIMIZE = False
+OUTPUT_COMPRESSION_QUALITIES = {10, 20, 30, 40, 50, 60, 70, 80, 90}
+DEFAULT_OUTPUT_SETTINGS = {
+    "compression_enabled": False,
+    "compression_quality": 70
+}
 
 DEFAULT_WATERMARK_SETTINGS = {
     "fit": "manual",
@@ -67,6 +73,74 @@ DEFAULT_WATERMARK_PROFILES = {
         "scale": 32
     }
 }
+
+
+def normalize_output_settings(settings=None):
+    settings = settings or {}
+    quality = settings.get(
+        "compression_quality",
+        settings.get(
+            "outputCompressionQuality",
+            DEFAULT_OUTPUT_SETTINGS["compression_quality"]
+        )
+    )
+
+    try:
+        quality = int(quality)
+    except (TypeError, ValueError):
+        quality = DEFAULT_OUTPUT_SETTINGS["compression_quality"]
+
+    if quality not in OUTPUT_COMPRESSION_QUALITIES:
+        quality = DEFAULT_OUTPUT_SETTINGS["compression_quality"]
+
+    return {
+        "compression_enabled": bool(
+            settings.get(
+                "compression_enabled",
+                settings.get(
+                    "outputCompressionEnabled",
+                    DEFAULT_OUTPUT_SETTINGS["compression_enabled"]
+                )
+            )
+        ),
+        "compression_quality": quality
+    }
+
+
+def load_output_settings():
+    if not os.path.exists(OUTPUT_SETTINGS_FILE):
+        return DEFAULT_OUTPUT_SETTINGS.copy()
+
+    try:
+        with open(OUTPUT_SETTINGS_FILE, "r") as file:
+            return normalize_output_settings(json.load(file))
+    except (OSError, json.JSONDecodeError):
+        return DEFAULT_OUTPUT_SETTINGS.copy()
+
+
+def write_output_settings(settings):
+    normalized = normalize_output_settings(settings)
+    os.makedirs(os.path.dirname(OUTPUT_SETTINGS_FILE), exist_ok=True)
+
+    with open(OUTPUT_SETTINGS_FILE, "w") as file:
+        json.dump(normalized, file, indent=2)
+
+    return normalized
+
+
+def get_output_jpeg_options():
+    settings = load_output_settings()
+    quality = (
+        settings["compression_quality"]
+        if settings["compression_enabled"]
+        else JPEG_QUALITY
+    )
+
+    return {
+        "quality": quality,
+        "subsampling": JPEG_SUBSAMPLING,
+        "optimize": JPEG_OPTIMIZE
+    }
 
 
 def normalize_watermark_settings(settings):
@@ -470,15 +544,15 @@ def process_image(image_path, drive_folder_id=None, source="photobooth"):
         # =========================
         # SAVE IMAGE
         # =========================
+        jpeg_options = get_output_jpeg_options()
         image.save(
             output_path,
             "JPEG",
-            quality=JPEG_QUALITY,
-            subsampling=JPEG_SUBSAMPLING,
-            optimize=JPEG_OPTIMIZE
+            **jpeg_options
         )
 
         print(f"✅ Process selesai: {output_path}")
+        print(f"🗜 JPEG quality: {jpeg_options['quality']}")
 
         # =========================
         # VERIFY OUTPUT

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { googleLogout } from "@react-oauth/google";
 import { invoke } from "@tauri-apps/api/core";
+import cameraReadyWhiteLogo from "./assets/camera-ready-white.png";
+import sisikitaCompanyLogo from "./assets/sisikita-company-logo.png";
 import "./App.css";
 
 const API_URL = "http://127.0.0.1:8000";
@@ -209,13 +211,19 @@ const PHOTOBOOTH_INITIAL_CAPTURE_DELAY = 3;
 const PHOTOBOOTH_NEXT_CAPTURE_DELAY = 3;
 const PHOTOBOOTH_INITIAL_READY_MS = 1500;
 const PHOTOBOOTH_NEXT_READY_MS = 1500;
+const PHOTOBOOTH_FINAL_PREVIEW_MS = 1800;
 const PHOTOBOOTH_ADMIN_SETTINGS_KEY = "photobooth_admin_settings";
 const PHOTOBOOTH_SLOT_COUNTS = [1, 2, 3];
+const OUTPUT_COMPRESSION_QUALITIES = [10, 20, 30, 40, 50, 60, 70, 80, 90];
 const DEFAULT_PHOTOBOOTH_ADMIN_SETTINGS = {
   stripPhotoCount: 1,
   editEnabled: true,
   autoPrintEnabled: true,
+  outputCompressionEnabled: false,
+  outputCompressionQuality: 70,
   printerName: "",
+  paperSize: "4r",
+  doubleStripEnabled: false,
   initialDriveFolderId: "",
 };
 const CAMERA_VIDEO_CONSTRAINTS = {
@@ -226,20 +234,52 @@ const CAMERA_VIDEO_CONSTRAINTS = {
 const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
 const STRIP_BASE_WIDTH = 1200;
 const STRIP_BASE_HEIGHT = 1800;
+const STRIP_PAPER_SIZES = {
+  "3r": {
+    label: "3R",
+    width: STRIP_BASE_WIDTH,
+    height: Math.round(STRIP_BASE_WIDTH * (10 / 7)),
+    ratioLabel: "7:10",
+  },
+  "4r": {
+    label: "4R",
+    width: STRIP_BASE_WIDTH,
+    height: STRIP_BASE_HEIGHT,
+    ratioLabel: "2:3",
+  },
+};
 const STRIP_PHOTO_ASPECT_RATIO = 16 / 9;
 const STRIP_SLOT_WIDTH_BY_COUNT = {
   1: 86,
   2: 84,
   3: 78,
 };
-const buildCenteredStripSlots = (slotCount = 3) => {
+const getStripPaperConfig = (paperSize = "4r") =>
+  STRIP_PAPER_SIZES[paperSize] || STRIP_PAPER_SIZES["4r"];
+const getStripBaseSize = (slotCount = 3, paperSize = "4r") => {
+  const paperConfig = getStripPaperConfig(paperSize);
+
+  if (Number(slotCount) === 1) {
+    return {
+      width: paperConfig.height,
+      height: paperConfig.width,
+    };
+  }
+
+  return {
+    width: paperConfig.width,
+    height: paperConfig.height,
+  };
+};
+const buildCenteredStripSlots = (slotCount = 3, paperSize = "4r") => {
   const normalizedSlotCount = clampNumber(Number(slotCount) || 3, 1, 3);
+  const stripBaseSize = getStripBaseSize(normalizedSlotCount, paperSize);
   const slotWidth = STRIP_SLOT_WIDTH_BY_COUNT[normalizedSlotCount] || 78;
   const slotHeight =
     ((slotWidth / 100) *
-      STRIP_BASE_WIDTH *
+      stripBaseSize.width *
       (1 / STRIP_PHOTO_ASPECT_RATIO) /
-      STRIP_BASE_HEIGHT) *
+      stripBaseSize.height) *
     100;
   const slotGap = (100 - slotHeight * normalizedSlotCount) / (normalizedSlotCount + 1);
 
@@ -252,9 +292,13 @@ const buildCenteredStripSlots = (slotCount = 3) => {
 };
 const STRIP_SLOTS = buildCenteredStripSlots(3);
 const STRIP_MIN_SLOT_SIZE = 1200;
-const getStripSlots = (slotCount = STRIP_SLOTS.length) =>
-  buildCenteredStripSlots(slotCount);
-const getStripBaseHeight = () => STRIP_BASE_HEIGHT;
+const STRIP_MAX_RENDER_SCALE = 2;
+const getStripSlots = (slotCount = STRIP_SLOTS.length, paperSize = "4r") =>
+  buildCenteredStripSlots(slotCount, paperSize);
+const getStripBaseWidth = (slotCount = 3, paperSize = "4r") =>
+  getStripBaseSize(slotCount, paperSize).width;
+const getStripBaseHeight = (slotCount = 3, paperSize = "4r") =>
+  getStripBaseSize(slotCount, paperSize).height;
 const createEmptyStripMap = () => STRIP_SLOTS.map(() => null);
 const addUrlCacheBust = (url) =>
   url
@@ -287,6 +331,19 @@ const createQrCodeUrl = (value) =>
   value
     ? `https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=12&data=${encodeURIComponent(value)}`
     : null;
+const normalizeCompressionQuality = (value) => {
+  const quality = Number(value);
+
+  return OUTPUT_COMPRESSION_QUALITIES.includes(quality) ? quality : 70;
+};
+const renderJpegBase64 = (canvas, compressionQuality = null) => {
+  const jpegQuality =
+    compressionQuality === null
+      ? 0.98
+      : normalizeCompressionQuality(compressionQuality) / 100;
+
+  return canvas.toDataURL("image/jpeg", jpegQuality).split(",")[1];
+};
 
 const normalizeWatermarkSettings = (settings = {}) => {
   if (!settings.portrait && !settings.landscape) {
@@ -335,13 +392,26 @@ const loadPhotoboothAdminSettings = () => {
         : 1,
       editEnabled: parsed.editEnabled !== false,
       autoPrintEnabled: parsed.autoPrintEnabled !== false,
+      outputCompressionEnabled: parsed.outputCompressionEnabled === true,
+      outputCompressionQuality: normalizeCompressionQuality(
+        parsed.outputCompressionQuality
+      ),
       printerName: String(parsed.printerName || ""),
-      initialDriveFolderId: String(parsed.initialDriveFolderId || ""),
+      paperSize: ["3r", "4r"].includes(parsed.paperSize) ? parsed.paperSize : "4r",
+      doubleStripEnabled: parsed.doubleStripEnabled === true,
+      initialDriveFolderId: String(parsed.initialDriveFolderId || "").trim(),
     };
   } catch {
     return DEFAULT_PHOTOBOOTH_ADMIN_SETTINGS;
   }
 };
+
+const normalizeOutputSettingsFromBackend = (settings = {}) => ({
+  outputCompressionEnabled: settings.compression_enabled === true,
+  outputCompressionQuality: normalizeCompressionQuality(
+    settings.compression_quality
+  ),
+});
 
 const mergeWatermarkData = (current, data, uploadOrientation = null) => {
   const imageUrls = {
@@ -399,13 +469,21 @@ function App() {
     pending: null,
     timer: null,
   });
+  const outputSettingsLoadedRef = useRef(false);
   const lastStripResultRef = useRef(null);
   const autoPrintTriggeredRef = useRef(false);
+  const photoboothAutoUploadKeyRef = useRef("");
+  const photoboothFinalBase64Ref = useRef(null);
   const lastPrintedStripRef = useRef(null);
 
   const [adminUser, setAdminUser] = useState(null);
   const [isVerifyingGoogleToken, setIsVerifyingGoogleToken] = useState(false);
   const [adminAuthError, setAdminAuthError] = useState("");
+  const [startupComplete, setStartupComplete] = useState(false);
+  const [isRunningStartup, setIsRunningStartup] = useState(false);
+  const [startupAttempted, setStartupAttempted] = useState(false);
+  const [startupChecks, setStartupChecks] = useState([]);
+  const [startupError, setStartupError] = useState("");
   const [driveAuthStatus, setDriveAuthStatus] = useState(null);
   const [isConnectingDrive, setIsConnectingDrive] = useState(false);
   const [driveAuthError, setDriveAuthError] = useState("");
@@ -521,25 +599,54 @@ function App() {
   const [uploadProgress, setUploadProgress] = useState({
     total: 0,
     queueIds: [],
+    files: [],
+    source: null,
   });
   const photoboothPhotoCount = photoboothAdminSettings.stripPhotoCount || 1;
+  const photoboothInitialDriveFolderId =
+    photoboothAdminSettings.initialDriveFolderId.trim();
+  const photoboothDriveConfigured = Boolean(photoboothInitialDriveFolderId);
   const driveAuthReady = Boolean(
     driveAuthStatus?.configured &&
       driveAuthStatus?.token_exists &&
       driveAuthStatus?.has_required_scopes &&
       (driveAuthStatus?.valid || driveAuthStatus?.has_refresh_token)
   );
-  const activeStripSlots = getStripSlots(photoboothPhotoCount);
-  const activeStripBaseHeight = getStripBaseHeight(photoboothPhotoCount);
+  const hasBlockingStartupIssue = startupChecks.some(
+    (check) => check.status === "error" && check.required
+  );
+  const activePaperSize = photoboothAdminSettings.paperSize || "4r";
+  const activePaperConfig = getStripPaperConfig(activePaperSize);
+  const doubleStripAvailable = photoboothPhotoCount >= 2;
+  const doubleStripEnabled =
+    doubleStripAvailable && photoboothAdminSettings.doubleStripEnabled;
+  const photoboothCaptureCount = doubleStripEnabled
+    ? photoboothPhotoCount * 2
+    : photoboothPhotoCount;
+  const capturePreviewGroupOffset = doubleStripEnabled
+    ? Math.min(
+        Math.floor(
+          Math.min(captures.length, Math.max(photoboothCaptureCount - 1, 0)) /
+            photoboothPhotoCount
+        ) * photoboothPhotoCount,
+        photoboothCaptureCount - photoboothPhotoCount
+      )
+    : 0;
+  const captureUpcomingSlotIndex =
+    captures.length >= photoboothCaptureCount
+      ? Math.max(0, photoboothPhotoCount - 1)
+      : captures.length % photoboothPhotoCount;
+  const activeStripSlots = getStripSlots(photoboothPhotoCount, activePaperSize);
+  const activeStripBaseWidth = getStripBaseWidth(photoboothPhotoCount, activePaperSize);
+  const activeStripBaseHeight = getStripBaseHeight(photoboothPhotoCount, activePaperSize);
   const activeStripPreviewStyle = {
-    aspectRatio: `${STRIP_BASE_WIDTH} / ${activeStripBaseHeight}`,
+    aspectRatio: `${activeStripBaseWidth} / ${activeStripBaseHeight}`,
   };
-  const activeStripHeightPercent = (activeStripBaseHeight / STRIP_BASE_HEIGHT) * 100;
   const getActiveStripSlotStyle = (slot) => ({
     left: `${slot.left}%`,
-    top: `${(slot.top / activeStripHeightPercent) * 100}%`,
+    top: `${slot.top}%`,
     width: `${slot.width}%`,
-    height: `${(slot.height / activeStripHeightPercent) * 100}%`,
+    height: `${slot.height}%`,
   });
   const getPreviewFrameStyle = (width, height, maxWidth = 300, maxHeight = 260) => {
     const ratio = width / height;
@@ -560,20 +667,17 @@ function App() {
       activePhotoboothTemplate.slots?.length &&
       activePhotoboothTemplate.width &&
       activePhotoboothTemplate.height;
-  const activePhotoboothTemplateSlots = hasUploadedTemplateLayout
+  const photoboothPreviewUsesUploadedTemplate =
+    hasUploadedTemplateLayout &&
+    !doubleStripEnabled &&
+    stripTemplateMode === "uploaded";
+  const activePhotoboothTemplateSlots = photoboothPreviewUsesUploadedTemplate
     ? activePhotoboothTemplate.slots
     : activeStripSlots;
   const viewportHeight =
     typeof window === "undefined" ? 720 : window.innerHeight;
-  const capturePhotoboothPreviewStyle = hasUploadedTemplateLayout
-    ? getPreviewFrameStyle(
-        activePhotoboothTemplate.width,
-        activePhotoboothTemplate.height,
-        1320,
-        Math.max(420, viewportHeight - 150)
-      )
-    : activeStripPreviewStyle;
-  const editPhotoboothPreviewStyle = hasUploadedTemplateLayout
+  const capturePhotoboothPreviewStyle = activeStripPreviewStyle;
+  const editPhotoboothPreviewStyle = photoboothPreviewUsesUploadedTemplate
     ? getPreviewFrameStyle(
         activePhotoboothTemplate.width,
         activePhotoboothTemplate.height,
@@ -582,7 +686,7 @@ function App() {
       )
     : activeStripPreviewStyle;
   const getPhotoboothTemplateSlotStyle = (slot) =>
-    hasUploadedTemplateLayout
+    photoboothPreviewUsesUploadedTemplate
       ? {
           left: `${slot.left}%`,
           top: `${slot.top}%`,
@@ -602,7 +706,7 @@ function App() {
           activePhotoboothTemplate.width,
           activePhotoboothTemplate.height
         )
-      : getPreviewFrameStyle(STRIP_BASE_WIDTH, activeStripBaseHeight);
+      : getPreviewFrameStyle(activeStripBaseWidth, activeStripBaseHeight);
   const getAdminPreviewSlotStyle = (slot) =>
     activePhotoboothTemplate?.active && activePhotoboothTemplate.slots?.length
       ? {
@@ -762,6 +866,49 @@ function App() {
       setWatermark((current) => mergeWatermarkData(current, data));
       setWatermarkSettings(normalizeWatermarkSettings(data.settings));
     }
+  };
+
+  const saveOutputSettings = async (settings) => {
+    const response = await fetch(`${API_URL}/output-settings`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        settings: {
+          compression_enabled: settings.outputCompressionEnabled,
+          compression_quality: settings.outputCompressionQuality,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error("Gagal menyimpan setting output");
+    }
+  };
+
+  const loadOutputSettings = async () => {
+    const response = await fetch(`${API_URL}/output-settings`, {
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return;
+    }
+
+    const data = await response.json();
+    const settings = data.settings || {};
+
+    if (settings.configured) {
+      setPhotoboothAdminSettings((current) => ({
+        ...current,
+        ...normalizeOutputSettingsFromBackend(settings),
+      }));
+    } else {
+      await saveOutputSettings(photoboothAdminSettings);
+    }
+
+    outputSettingsLoadedRef.current = true;
   };
 
   const loadPhotoboothTemplate = async () => {
@@ -1018,6 +1165,7 @@ function App() {
             loadPhotoQueue();
             loadAutoWatchFolder();
             loadWatermark();
+            loadOutputSettings();
             loadPhotoboothTemplate();
             loadDriveAuthStatus();
             loadPrinters();
@@ -1069,6 +1217,20 @@ function App() {
       JSON.stringify(photoboothAdminSettings)
     );
   }, [photoboothAdminSettings]);
+
+  useEffect(() => {
+    if (!backendReady || !outputSettingsLoadedRef.current) {
+      return;
+    }
+
+    saveOutputSettings(photoboothAdminSettings).catch((error) => {
+      console.warn("backend output settings failed:", error);
+    });
+  }, [
+    backendReady,
+    photoboothAdminSettings.outputCompressionEnabled,
+    photoboothAdminSettings.outputCompressionQuality,
+  ]);
 
   useEffect(() => {
     if (!photoboothAdminSettings.editEnabled && photoboothStep === 3) {
@@ -1212,7 +1374,18 @@ function App() {
                     orientation === "portrait" ? "Portrait" : "Landscape",
                 });
               };
-              image.onerror = () => resolve(null);
+              image.onerror = () => {
+                resolve({
+                  id: file.path,
+                  file,
+                  url,
+                  width: null,
+                  height: null,
+                  orientation: "landscape",
+                  orientationLabel: "File",
+                  previewError: true,
+                });
+              };
               image.src = url;
             })
         )
@@ -1257,7 +1430,18 @@ function App() {
                   orientation === "portrait" ? "Portrait" : "Landscape",
               });
             };
-            image.onerror = () => resolve(null);
+            image.onerror = () => {
+              resolve({
+                id: `${file.webkitRelativePath || file.name}-${file.size}-${file.lastModified}`,
+                file,
+                url,
+                width: null,
+                height: null,
+                orientation: "landscape",
+                orientationLabel: "File",
+                previewError: true,
+              });
+            };
             image.src = url;
           })
       )
@@ -1311,7 +1495,7 @@ function App() {
     const nextSlots =
       photoboothTemplate?.active && photoboothTemplate.slots?.length
         ? photoboothTemplate.slots
-        : getStripSlots(photoboothPhotoCount);
+        : getStripSlots(photoboothPhotoCount, activePaperSize);
 
     setPhotoboothTemplateSlots(nextSlots);
     setTemplatePhotoAdjustments((current) =>
@@ -1322,7 +1506,7 @@ function App() {
     setSelectedTemplateSlot((current) =>
       Math.min(current, nextSlots.length - 1)
     );
-  }, [photoboothTemplate, photoboothPhotoCount]);
+  }, [photoboothTemplate, photoboothPhotoCount, activePaperSize]);
 
   const retryStream = () => {
     window.clearTimeout(retryTimer.current);
@@ -1340,7 +1524,7 @@ function App() {
     const sessionSlots =
       sessionTemplate?.active && sessionTemplate.slots?.length
         ? sessionTemplate.slots
-        : getStripSlots(photoboothPhotoCount);
+        : getStripSlots(photoboothPhotoCount, activePaperSize);
 
     clearAutoCaptureTimers();
     setCaptures([]);
@@ -1351,7 +1535,7 @@ function App() {
     setPhotoboothEditMode("photo");
     setSelectedEditPhotoIndex(0);
     setDraftPhotoEffect("natural");
-    setPhotoEffectMap(["natural", "natural", "natural", "natural"]);
+    setPhotoEffectMap(Array.from({ length: photoboothCaptureCount }, () => "natural"));
     setSlotPhotoMap(createEmptyStripMap());
     setPhotoboothTemplate(sessionTemplate);
     setStripTemplateMode(getPreferredStripTemplateMode(sessionTemplate));
@@ -1362,6 +1546,8 @@ function App() {
     setPhotoboothEmail("");
     setPhotoboothDriveResult(null);
     setPhotoboothFinalPreviewUrl(null);
+    photoboothFinalBase64Ref.current = null;
+    photoboothAutoUploadKeyRef.current = "";
     setIsRenderingPhotoboothPreview(false);
     setDraggingStripPhoto(null);
     stripDragRef.current = null;
@@ -1375,9 +1561,21 @@ function App() {
       return;
     }
 
+    if (!photoboothDriveConfigured) {
+      setStatus("Admin harus mengisi Drive Awal Photobooth dulu");
+      window.setTimeout(() => setStatus(""), 3000);
+      return;
+    }
+
     try {
       const response = await fetch(`${API_URL}/photobooth/session/start`, {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          drive_folder_id: photoboothInitialDriveFolderId,
+        }),
       });
       const data = await response.json();
 
@@ -1392,7 +1590,7 @@ function App() {
       const sessionSlots =
         sessionTemplate?.active && sessionTemplate.slots?.length
           ? sessionTemplate.slots
-          : getStripSlots(photoboothPhotoCount);
+          : getStripSlots(photoboothPhotoCount, activePaperSize);
 
       setStatus("Sesi baru siap, kamera akan aktif untuk atur posisi");
       setAutoCaptureCountdown(null);
@@ -1401,7 +1599,7 @@ function App() {
       setPhotoboothEditMode("strip");
       setSelectedEditPhotoIndex(0);
       setDraftPhotoEffect("natural");
-      setPhotoEffectMap(["natural", "natural", "natural", "natural"]);
+      setPhotoEffectMap(Array.from({ length: photoboothCaptureCount }, () => "natural"));
       setSlotPhotoMap(createEmptyStripMap());
       setPhotoboothTemplate(sessionTemplate);
       setStripTemplateMode(getPreferredStripTemplateMode(sessionTemplate));
@@ -1410,6 +1608,8 @@ function App() {
       );
       setPhotoboothDriveResult(null);
       setPhotoboothFinalPreviewUrl(null);
+      photoboothFinalBase64Ref.current = null;
+      photoboothAutoUploadKeyRef.current = "";
       setIsRenderingPhotoboothPreview(false);
       setCaptures([]);
       setPhotoboothStep(2);
@@ -1459,8 +1659,8 @@ function App() {
       return false;
     }
 
-    if (captures.length >= photoboothPhotoCount) {
-      setStatus(`Sesi ini sudah berisi ${photoboothPhotoCount} foto`);
+    if (captures.length >= photoboothCaptureCount) {
+      setStatus(`Sesi ini sudah berisi ${photoboothCaptureCount} foto`);
       return false;
     }
 
@@ -1473,7 +1673,7 @@ function App() {
     try {
       const cameraFrame = captureBrowserCameraFrame();
       const capturePayload = {
-        max_photo_count: photoboothPhotoCount,
+        max_photo_count: photoboothCaptureCount,
         ...(cameraFrame ? { data_base64: cameraFrame } : {}),
       };
       const response = await fetch(`${API_URL}/capture`, {
@@ -1494,9 +1694,8 @@ function App() {
       await loadCaptures();
       await loadPhotoQueue();
       setShowResult(true);
-      window.setTimeout(() => setShowResult(false), 1800);
 
-      if (nextCaptureCount >= photoboothPhotoCount) {
+      if (nextCaptureCount >= photoboothCaptureCount) {
         clearAutoCaptureTimers();
         setAutoCaptureCountdown(null);
         setAutoCaptureLabel("Selesai");
@@ -1505,15 +1704,10 @@ function App() {
             index < photoboothPhotoCount ? index : null
           )
         );
-        setShowResult(false);
-        if (photoboothAdminSettings.editEnabled) {
-          setPhotoboothEditMode("strip");
-          setPhotoboothStep(3);
-          setStatus(`${photoboothPhotoCount} foto selesai, silakan edit strip`);
-        } else {
-          setPhotoboothStep(4);
-          setStatus(`${photoboothPhotoCount} foto selesai, strip siap dikirim atau dicetak`);
-        }
+        setPhotoboothEditMode("strip");
+        setStatus(`${photoboothCaptureCount} foto selesai, menyiapkan hasil...`);
+      } else {
+        window.setTimeout(() => setShowResult(false), 1800);
       }
 
       return true;
@@ -1544,8 +1738,8 @@ function App() {
     }
 
     const scrollTargetIndex = showResult
-      ? Math.max(0, captures.length - 1)
-      : Math.min(captures.length, photoboothPhotoCount - 1);
+      ? Math.max(0, captures.length - 1) % photoboothPhotoCount
+      : captureUpcomingSlotIndex;
     const scrollFrame = window.requestAnimationFrame(() => {
       const stripViewport = captureStripScrollRef.current;
       const targetSlot = stripViewport?.querySelector(
@@ -1573,7 +1767,14 @@ function App() {
     });
 
     return () => window.cancelAnimationFrame(scrollFrame);
-  }, [activeView, captures.length, photoboothPhotoCount, photoboothStep, showResult]);
+  }, [
+    activeView,
+    captureUpcomingSlotIndex,
+    captures.length,
+    photoboothPhotoCount,
+    photoboothStep,
+    showResult,
+  ]);
 
   useEffect(() => {
     if (activeView !== "photobooth" || photoboothStep !== 2) {
@@ -1585,7 +1786,7 @@ function App() {
       return undefined;
     }
 
-    if (captures.length >= photoboothPhotoCount) {
+    if (captures.length >= photoboothCaptureCount) {
       clearAutoCaptureTimers();
       setAutoCaptureCountdown(null);
       setAutoCaptureLabel("Selesai");
@@ -1599,12 +1800,12 @@ function App() {
       const nextStepTimer = window.setTimeout(() => {
         if (photoboothAdminSettings.editEnabled) {
           setPhotoboothStep(3);
-          setStatus(`${photoboothPhotoCount} foto selesai, silakan edit strip`);
+          setStatus(`${photoboothCaptureCount} foto selesai, silakan edit strip`);
         } else {
           setPhotoboothStep(4);
-          setStatus(`${photoboothPhotoCount} foto selesai, strip siap dikirim atau dicetak`);
+          setStatus(`${photoboothCaptureCount} foto selesai, strip siap dikirim atau dicetak`);
         }
-      }, 900);
+      }, PHOTOBOOTH_FINAL_PREVIEW_MS);
 
       return () => window.clearTimeout(nextStepTimer);
     }
@@ -1666,6 +1867,7 @@ function App() {
     captures.length,
     isCapturing,
     photoboothAdminSettings.editEnabled,
+    photoboothCaptureCount,
     photoboothPhotoCount,
     photoboothStep,
     showResult,
@@ -1859,6 +2061,12 @@ function App() {
 
   const addSelectedFiles = (files, inputMode = "user") => {
     setUploadInputMode(inputMode);
+    const imageFiles = files.filter(
+      (file) =>
+        file.type.startsWith("image/") ||
+        /\.(jpe?g|png)$/i.test(file.name || file.webkitRelativePath || "")
+    );
+
     setSelectedFiles((currentFiles) => {
       const indexedFiles = new Map(
         currentFiles.map((file) => [
@@ -1867,7 +2075,7 @@ function App() {
         ])
       );
 
-      files.forEach((file) => {
+      imageFiles.forEach((file) => {
         indexedFiles.set(
           `${file.webkitRelativePath || file.name}-${file.size}-${file.lastModified}`,
           file
@@ -2057,6 +2265,13 @@ function App() {
         setUploadProgress({
           total: data.committed,
           queueIds: data.queue_ids || [],
+          files: (data.files || []).map((file) => ({
+            name: file.name,
+            path: file.path,
+            size: file.size,
+            image_url: `${API_URL}/auto-watch-folder/file?path=${encodeURIComponent(file.path)}`,
+          })),
+          source: "folder",
         });
         setActiveWatchFolder(data.watch);
         setUploadStep(3);
@@ -2109,6 +2324,11 @@ function App() {
       setUploadProgress({
         total: selectedFiles.length,
         queueIds: uploadedQueueIds.filter(Boolean),
+        files: selectedFiles.map((file) => ({
+          name: file.webkitRelativePath || file.name,
+          size: file.size,
+        })),
+        source: "user",
       });
       clearSelectedFiles();
       setUploadStep(3);
@@ -2153,6 +2373,38 @@ function App() {
     processing: queue.filter((item) => item.status === "processing").length,
     failed: queue.filter((item) => item.status === "failed").length,
   };
+  const uploadBatchQueueMap = new Map(queue.map((item) => [item.id, item]));
+  const uploadPreviewItems = (uploadProgress.files || []).map((file, index) => {
+    const queueId = uploadProgress.queueIds[index];
+    const queueItem = uploadBatchQueueMap.get(queueId);
+    const statusValue = queueItem?.status || (queueId ? "uploaded" : "pending");
+
+    return {
+      id: queueId || file.path || file.name || index,
+      name: queueItem?.filename || file.name || `File ${index + 1}`,
+      size: file.size || 0,
+      image_url: queueItem?.image_url || file.image_url || null,
+      status: statusValue,
+      error: queueItem?.last_error || "",
+      meta:
+        statusValue === "uploaded"
+          ? "Selesai upload"
+          : statusValue === "processing"
+            ? "Sedang berjalan"
+            : statusValue === "failed"
+              ? "Butuh tindakan"
+              : "Menunggu giliran",
+    };
+  });
+  const uploadPreviewSummary = {
+    total: uploadPreviewItems.length,
+    uploaded: uploadPreviewItems.filter((item) => item.status === "uploaded").length,
+    processing: uploadPreviewItems.filter((item) => item.status === "processing").length,
+    pending: uploadPreviewItems.filter(
+      (item) => item.status === "pending" || item.status === "staged"
+    ).length,
+    failed: uploadPreviewItems.filter((item) => item.status === "failed").length,
+  };
   const photoQueueSummary = {
     total: photoQueue.length,
     pending: photoQueue.filter((item) => item.status === "pending").length,
@@ -2182,6 +2434,10 @@ function App() {
 
     if (status === "staged") {
       return "Siap dikirim";
+    }
+
+    if (status === "uploaded") {
+      return "Terupload";
     }
 
     return status;
@@ -2229,6 +2485,8 @@ function App() {
       setUploadProgress({
         total: 0,
         queueIds: [],
+        files: [],
+        source: null,
       });
       setStatus(`${data.deleted} item queue dibersihkan`);
       await loadQueue();
@@ -2314,7 +2572,7 @@ function App() {
   ).length;
   const latestCapture = captures[0];
   const photoboothSlotCaptures = captures
-    .slice(0, photoboothPhotoCount)
+    .slice(0, photoboothCaptureCount)
     .reverse();
   const getPhotoboothEffect = (effectId) =>
     PHOTOBOOTH_EFFECTS.find((effect) => effect.id === effectId) ||
@@ -2563,7 +2821,10 @@ function App() {
     }
 
     setSelectedTemplateSlot(slotIndex);
-    updateSlotPhoto(slotIndex, photoIndex);
+    updateSlotPhoto(
+      slotIndex,
+      doubleStripEnabled ? photoIndex % photoboothPhotoCount : photoIndex
+    );
     updateTemplateSlotAdjustmentByIndex(slotIndex, {
       ...DEFAULT_SLOT_ADJUSTMENT,
     });
@@ -2796,14 +3057,17 @@ function App() {
   };
 
   const renderPhotoboothStrip = async () => {
-    if (photoboothSlotCaptures.length < photoboothPhotoCount) {
-      throw new Error(`Ambil ${photoboothPhotoCount} foto dulu sebelum upload`);
+    if (photoboothSlotCaptures.length < photoboothCaptureCount) {
+      throw new Error(`Ambil ${photoboothCaptureCount} foto dulu sebelum upload`);
     }
 
     const usingUploadedTemplate =
       stripTemplateMode === "uploaded" &&
+      !doubleStripEnabled &&
       activePhotoboothTemplate?.active &&
       activePhotoboothTemplate.image_url;
+    const renderDoubleStrip =
+      !usingUploadedTemplate && doubleStripEnabled;
     const renderSlots =
       usingUploadedTemplate && photoboothTemplate.slots?.length
         ? photoboothTemplate.slots.slice(0, photoboothPhotoCount)
@@ -2813,26 +3077,57 @@ function App() {
       throw new Error("Isi semua kotak strip dulu dengan drag and drop foto");
     }
 
-    const loadedImages = [];
+    const loadedImages = new Map();
     let loadedTemplate = null;
 
-    for (let index = 0; index < renderSlots.length; index += 1) {
-      const photoIndex = slotPhotoMap[index];
+    const getMappedPhotoIndex = (slotIndex, photoOffset = 0) => {
+      const mappedPhotoIndex = slotPhotoMap[slotIndex];
+
+      if (mappedPhotoIndex === null || mappedPhotoIndex === undefined) {
+        return null;
+      }
+
+      const basePhotoIndex = renderDoubleStrip
+        ? mappedPhotoIndex % photoboothPhotoCount
+        : mappedPhotoIndex;
+
+      return basePhotoIndex + photoOffset;
+    };
+
+    const loadCaptureImage = async (photoIndex) => {
+      if (photoIndex === null || photoIndex === undefined) {
+        return null;
+      }
+
       const capture = photoboothSlotCaptures[photoIndex];
 
       if (!capture) {
-        loadedImages[index] = null;
-        continue;
+        return null;
       }
 
-      loadedImages[index] = await loadImage(`${capture.image_url}?v=${streamVersion}`);
+      if (!loadedImages.has(photoIndex)) {
+        loadedImages.set(
+          photoIndex,
+          await loadImage(`${capture.image_url}?v=${streamVersion}`)
+        );
+      }
+
+      return loadedImages.get(photoIndex);
+    };
+
+    for (let index = 0; index < renderSlots.length; index += 1) {
+      await loadCaptureImage(getMappedPhotoIndex(index, 0));
+
+      if (renderDoubleStrip) {
+        await loadCaptureImage(getMappedPhotoIndex(index, photoboothPhotoCount));
+      }
     }
 
     if (usingUploadedTemplate) {
       loadedTemplate = await loadImage(activePhotoboothTemplate.image_url);
     }
 
-    const largestSourceSide = loadedImages.reduce((largest, loadedImage) => {
+    const largestSourceSide = Array.from(loadedImages.values()).reduce((largest, loadedImage) => {
       if (!loadedImage) {
         return largest;
       }
@@ -2848,67 +3143,111 @@ function App() {
     const templateImageHeight =
       loadedTemplate?.image.naturalHeight || loadedTemplate?.image.height || null;
     const slotWidthRatio = (renderSlots[0]?.width || STRIP_SLOTS[0].width) / 100;
-    const baseWidth = loadedTemplate ? templateImageWidth : STRIP_BASE_WIDTH;
-    const baseHeight = loadedTemplate ? templateImageHeight : activeStripBaseHeight;
+    const baseWidth = loadedTemplate
+      ? templateImageWidth
+      : renderDoubleStrip
+        ? activePaperConfig.width / 2
+        : activeStripBaseWidth;
+    const baseHeight = loadedTemplate
+      ? templateImageHeight
+      : renderDoubleStrip
+        ? activePaperConfig.height
+        : activeStripBaseHeight;
     const stripScale = loadedTemplate
       ? 1
-      : largestSourceSide / (baseWidth * slotWidthRatio);
-    const stripWidth = Math.ceil(baseWidth * stripScale);
+      : Math.min(
+          STRIP_MAX_RENDER_SCALE,
+          largestSourceSide / (baseWidth * slotWidthRatio)
+        );
+    const stripWidth = Math.ceil(
+      (renderDoubleStrip ? activePaperConfig.width : baseWidth) *
+        stripScale
+    );
     const stripHeight = Math.ceil(baseHeight * stripScale);
     const canvas = document.createElement("canvas");
     canvas.width = stripWidth;
     canvas.height = stripHeight;
     const context = canvas.getContext("2d");
+    const drawCanvas = renderDoubleStrip ? document.createElement("canvas") : canvas;
+    drawCanvas.width = renderDoubleStrip
+      ? Math.ceil(baseWidth * stripScale)
+      : canvas.width;
+    drawCanvas.height = canvas.height;
+    const drawContext = drawCanvas.getContext("2d");
 
-    context.fillStyle = "#f7f7f2";
-    context.fillRect(0, 0, canvas.width, canvas.height);
+    drawContext.fillStyle = "#f7f7f2";
+    drawContext.fillRect(0, 0, drawCanvas.width, drawCanvas.height);
 
-    for (let index = 0; index < renderSlots.length; index += 1) {
-      const slot = renderSlots[index];
-      const photoIndex = slotPhotoMap[index];
-      const capture = photoboothSlotCaptures[photoIndex];
-      const adjustment = templatePhotoAdjustments[index] || DEFAULT_SLOT_ADJUSTMENT;
-      const savedEffect = getPhotoboothEffect(photoEffectMap[photoIndex]);
+    const drawStripSide = async (photoOffset = 0) => {
+      drawContext.fillStyle = "#f7f7f2";
+      drawContext.fillRect(0, 0, drawCanvas.width, drawCanvas.height);
 
-      if (!capture) {
-        continue;
+      for (let index = 0; index < renderSlots.length; index += 1) {
+        const slot = renderSlots[index];
+        const photoIndex = getMappedPhotoIndex(index, photoOffset);
+        const capture = photoboothSlotCaptures[photoIndex];
+        const adjustment = templatePhotoAdjustments[index] || DEFAULT_SLOT_ADJUSTMENT;
+        const savedEffect = getPhotoboothEffect(photoEffectMap[photoIndex]);
+
+        if (!capture) {
+          continue;
+        }
+
+        const loadedImage = await loadCaptureImage(photoIndex);
+        const image = loadedImage.image;
+        const x = (slot.left / 100) * drawCanvas.width;
+        const y = (slot.top / 100) * drawCanvas.height;
+        const width = (slot.width / 100) * drawCanvas.width;
+        const height = (slot.height / 100) * drawCanvas.height;
+        const drawWidth = width * (adjustment.scale / 100);
+        const drawHeight = drawWidth * (image.height / image.width);
+        const offsetX = (adjustment.x / 100) * width;
+        const offsetY = (adjustment.y / 100) * height;
+
+        drawContext.save();
+        drawContext.beginPath();
+        drawContext.rect(x, y, width, height);
+        drawContext.clip();
+        drawContext.filter = savedEffect.filter;
+        drawContext.drawImage(
+          image,
+          x + (width - drawWidth) / 2 + offsetX,
+          y + (height - drawHeight) / 2 + offsetY,
+          drawWidth,
+          drawHeight
+        );
+        drawContext.restore();
       }
 
-      const loadedImage = loadedImages[index];
-      const image = loadedImage.image;
-      const x = (slot.left / 100) * canvas.width;
-      const y = (slot.top / 100) * canvas.height;
-      const width = (slot.width / 100) * canvas.width;
-      const height = (slot.height / 100) * canvas.height;
-      const drawWidth = width * (adjustment.scale / 100);
-      const drawHeight = drawWidth * (image.height / image.width);
-      const offsetX = (adjustment.x / 100) * width;
-      const offsetY = (adjustment.y / 100) * height;
+      if (loadedTemplate) {
+        drawContext.save();
+        drawContext.filter = "none";
+        drawTemplateOverlay(
+          drawContext,
+          loadedTemplate.image,
+          drawCanvas.width,
+          drawCanvas.height
+        );
+        drawContext.restore();
+      }
+    };
 
+    await drawStripSide(0);
+
+    if (renderDoubleStrip) {
+      context.fillStyle = "#f7f7f2";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(drawCanvas, 0, 0);
+      await drawStripSide(photoboothPhotoCount);
+      context.drawImage(drawCanvas, drawCanvas.width, 0);
       context.save();
+      context.setLineDash([18 * stripScale, 12 * stripScale]);
+      context.strokeStyle = "rgba(17, 19, 24, 0.42)";
+      context.lineWidth = Math.max(2, 2 * stripScale);
       context.beginPath();
-      context.rect(x, y, width, height);
-      context.clip();
-      context.filter = savedEffect.filter;
-      context.drawImage(
-        image,
-        x + (width - drawWidth) / 2 + offsetX,
-        y + (height - drawHeight) / 2 + offsetY,
-        drawWidth,
-        drawHeight
-      );
-      context.restore();
-    }
-
-    if (loadedTemplate) {
-      context.save();
-      context.filter = "none";
-      drawTemplateOverlay(
-        context,
-        loadedTemplate.image,
-        canvas.width,
-        canvas.height
-      );
+      context.moveTo(drawCanvas.width, 0);
+      context.lineTo(drawCanvas.width, canvas.height);
+      context.stroke();
       context.restore();
     }
 
@@ -2921,7 +3260,12 @@ function App() {
       URL.revokeObjectURL(loadedTemplate.objectUrl);
     }
 
-    return canvas.toDataURL("image/jpeg", 0.98).split(",")[1];
+    return renderJpegBase64(
+      canvas,
+      photoboothAdminSettings.outputCompressionEnabled
+        ? photoboothAdminSettings.outputCompressionQuality
+        : null
+    );
   };
 
   useEffect(() => {
@@ -2930,7 +3274,7 @@ function App() {
     if (
       activeView !== "photobooth" ||
       photoboothStep !== 4 ||
-      captures.length < photoboothPhotoCount ||
+      captures.length < photoboothCaptureCount ||
       filledStripSlotCount < activeStripSlots.length
     ) {
       setPhotoboothFinalPreviewUrl(null);
@@ -2944,7 +3288,16 @@ function App() {
         if (!cancelled) {
           const url = `data:image/jpeg;base64,${dataBase64}`;
           setPhotoboothFinalPreviewUrl(url);
+          photoboothFinalBase64Ref.current = dataBase64;
           lastStripResultRef.current = url;
+          const uploadKey = photoboothSlotCaptures
+            .slice(0, photoboothCaptureCount)
+            .map((capture) => capture?.file || capture?.filename || "")
+            .join("|");
+          if (photoboothAutoUploadKeyRef.current === uploadKey) {
+            return;
+          }
+          photoboothAutoUploadKeyRef.current = uploadKey;
           const now = new Date();
           const hours = String(now.getHours()).padStart(2, "0");
           let jobId = 1;
@@ -2954,7 +3307,7 @@ function App() {
             if (data.success) jobId = data.job_id;
           } catch {}
           const folderName = `Job - ${jobId} - ${hours}`;
-          handlePhotoboothDriveUpload(folderName);
+          handlePhotoboothDriveUpload(folderName, dataBase64);
         }
       })
       .catch((error) => {
@@ -2977,6 +3330,7 @@ function App() {
     captures.length,
     filledStripSlotCount,
     photoEffectMap,
+    photoboothCaptureCount,
     photoboothStep,
     photoboothTemplate,
     photoboothTemplates,
@@ -3013,7 +3367,7 @@ function App() {
     photoboothAdminSettings.autoPrintEnabled,
   ]);
 
-  const handlePhotoboothDriveUpload = async (customFolderName) => {
+  const handlePhotoboothDriveUpload = async (customFolderName, renderedDataBase64 = null) => {
     if (!backendReady || isUploadingPhotoboothDrive) {
       return;
     }
@@ -3022,7 +3376,10 @@ function App() {
     setStatus("Membuat strip dan folder Google Drive...");
 
     try {
-      const dataBase64 = await renderPhotoboothStrip();
+      const dataBase64 =
+        renderedDataBase64 ||
+        photoboothFinalBase64Ref.current ||
+        await renderPhotoboothStrip();
       const response = await fetch(`${API_URL}/photobooth/drive-upload`, {
         method: "POST",
         headers: {
@@ -3032,8 +3389,7 @@ function App() {
           filename: "photobooth-strip.jpg",
           data_base64: dataBase64,
           folder_name: customFolderName,
-          parent_drive_folder_id:
-            photoboothAdminSettings.initialDriveFolderId.trim() || null,
+          parent_drive_folder_id: photoboothInitialDriveFolderId,
         }),
       });
       const data = await response.json();
@@ -3046,6 +3402,7 @@ function App() {
       setStatus(`Folder ${data.folder_name} dibuat`);
       await loadPhotoQueue();
     } catch (error) {
+      photoboothAutoUploadKeyRef.current = "";
       setStatus(error.message || "Gagal upload photobooth");
     } finally {
       setIsUploadingPhotoboothDrive(false);
@@ -3092,6 +3449,7 @@ function App() {
 
   const printPhotoboothStrip = async (dataBase64, { automatic = false } = {}) => {
     const printerName = photoboothAdminSettings.printerName.trim();
+    const paperSize = photoboothAdminSettings.paperSize || "4r";
 
     if (!printerName) {
       const message = "Pilih printer di admin panel dulu";
@@ -3113,7 +3471,11 @@ function App() {
 
     setIsPrintingStrip(true);
     setPrintError("");
-    setStatus(automatic ? `Mencetak otomatis ke ${printerName}...` : `Mencetak ke ${printerName}...`);
+    setStatus(
+      automatic
+        ? `Mencetak otomatis ${paperSize.toUpperCase()} ke ${printerName}...`
+        : `Mencetak ${paperSize.toUpperCase()} ke ${printerName}...`
+    );
 
     try {
       const response = await fetch(`${API_URL}/photobooth/print`, {
@@ -3125,6 +3487,7 @@ function App() {
           filename: "photobooth-strip.jpg",
           data_base64: dataBase64,
           printer_name: printerName,
+          paper_size: paperSize,
         }),
       });
       const data = await response.json();
@@ -3133,7 +3496,7 @@ function App() {
         throw new Error(data.message || "Gagal mencetak strip");
       }
 
-      setStatus(`Strip dikirim ke printer ${printerName}`);
+      setStatus(`Strip ${paperSize.toUpperCase()} dikirim ke printer ${printerName}`);
       return true;
     } catch (error) {
       const message = error.message || "Gagal mencetak strip";
@@ -3204,6 +3567,207 @@ function App() {
     printWindow.document.close();
   };
 
+  const updateStartupCheck = (id, partialCheck) => {
+    setStartupChecks((current) => {
+      const exists = current.some((check) => check.id === id);
+      const nextCheck = {
+        id,
+        name: partialCheck.name || id,
+        status: partialCheck.status || "pending",
+        message: partialCheck.message || "",
+        repair: partialCheck.repair || "",
+        required: Boolean(partialCheck.required),
+      };
+
+      if (!exists) {
+        return [...current, nextCheck];
+      }
+
+      return current.map((check) =>
+        check.id === id
+          ? {
+              ...check,
+              ...nextCheck,
+            }
+          : check
+      );
+    });
+  };
+
+  const runStartupChecks = useCallback(async () => {
+    if (!adminUser || isRunningStartup) {
+      return;
+    }
+
+    setStartupComplete(false);
+    setStartupError("");
+    setStartupAttempted(true);
+    setIsRunningStartup(true);
+    setStartupChecks([
+      {
+        id: "backend",
+        name: "Backend service",
+        status: "pending",
+        message: "Menunggu service siap...",
+        repair: "",
+        required: true,
+      },
+      {
+        id: "files",
+        name: "File integrity",
+        status: "pending",
+        message: "Memeriksa folder, config, watermark, dan template...",
+        repair: "",
+        required: true,
+      },
+      {
+        id: "drive",
+        name: "Google Drive token",
+        status: "pending",
+        message: "Memeriksa token Drive...",
+        repair: "",
+        required: false,
+      },
+      {
+        id: "assets",
+        name: "Data awal aplikasi",
+        status: "pending",
+        message: "Memuat queue, watermark, template, dan printer...",
+        repair: "",
+        required: true,
+      },
+      {
+        id: "camera",
+        name: "Kamera lokal",
+        status: "pending",
+        message: "Membaca daftar kamera...",
+        repair: "",
+        required: false,
+      },
+    ]);
+
+    try {
+      const backendResponse = await fetch(`${API_URL}/`, {
+        cache: "no-store",
+      });
+
+      if (!backendResponse.ok) {
+        throw new Error("Backend belum siap");
+      }
+
+      updateStartupCheck("backend", {
+        name: "Backend service",
+        status: "ok",
+        message: "Backend siap menerima request",
+        required: true,
+      });
+
+      const fileResponse = await fetch(`${API_URL}/startup/checks`, {
+        cache: "no-store",
+      });
+      const fileData = await fileResponse.json();
+
+      if (!fileResponse.ok) {
+        throw new Error(fileData.message || "Gagal memeriksa file startup");
+      }
+
+      const blockingIssues = (fileData.checks || []).filter(
+        (check) => check.status === "error" && check.required
+      );
+      const warningCount = Number(fileData.warning_count || 0);
+
+      updateStartupCheck("files", {
+        name: "File integrity",
+        status: blockingIssues.length ? "error" : warningCount ? "warning" : "ok",
+        message: blockingIssues.length
+          ? `${blockingIssues.length} file/folder wajib bermasalah`
+          : warningCount
+            ? `${warningCount} file opsional perlu dicek`
+            : "Semua file wajib valid",
+        repair: blockingIssues[0]?.repair || "File opsional bisa di-upload ulang dari admin panel.",
+        required: true,
+      });
+
+      setStartupChecks((current) => [
+        ...current.filter((check) => !check.id.startsWith("file-")),
+        ...(fileData.checks || []).map((check, index) => ({
+          id: `file-${index}`,
+          ...check,
+          required: Boolean(check.required),
+        })),
+      ]);
+
+      if (blockingIssues.length) {
+        throw new Error("Startup ditahan karena ada file wajib yang rusak.");
+      }
+
+      const nextDriveAuthStatus = await loadDriveAuthStatus();
+      const nextDriveAuthReady = Boolean(
+        nextDriveAuthStatus?.configured &&
+          nextDriveAuthStatus?.token_exists &&
+          nextDriveAuthStatus?.has_required_scopes &&
+          (nextDriveAuthStatus?.valid || nextDriveAuthStatus?.has_refresh_token)
+      );
+      updateStartupCheck("drive", {
+        name: "Google Drive token",
+        status: nextDriveAuthReady ? "ok" : "warning",
+        message: nextDriveAuthReady
+          ? "Token Drive siap"
+          : "Token Drive belum lengkap, hubungkan ulang dari admin bila upload gagal",
+        repair: "Buka admin panel lalu tekan Reconnect Drive.",
+        required: false,
+      });
+
+      await Promise.all([
+        loadCaptures(),
+        loadQueue(),
+        loadPhotoQueue(),
+        loadAutoWatchFolder(),
+        loadWatermark(),
+        loadPhotoboothTemplate(),
+        loadPrinters(),
+      ]);
+      updateStartupCheck("assets", {
+        name: "Data awal aplikasi",
+        status: "ok",
+        message: "Queue, watermark, template, dan printer selesai dimuat",
+        required: true,
+      });
+
+      if (navigator.mediaDevices?.enumerateDevices) {
+        const devices = (await navigator.mediaDevices.enumerateDevices()).filter(
+          (device) => device.kind === "videoinput"
+        );
+        setCameraDevices(devices);
+        updateStartupCheck("camera", {
+          name: "Kamera lokal",
+          status: devices.length ? "ok" : "warning",
+          message: devices.length
+            ? `${devices.length} kamera terdeteksi`
+            : "Kamera belum terdeteksi atau izin belum diberikan",
+          repair: "Cek permission kamera di System Settings lalu restart app bila perlu.",
+          required: false,
+        });
+      } else {
+        updateStartupCheck("camera", {
+          name: "Kamera lokal",
+          status: "warning",
+          message: "Browser runtime tidak menyediakan daftar kamera",
+          repair: "Cek permission kamera dari sistem operasi.",
+          required: false,
+        });
+      }
+
+      setStartupComplete(true);
+      setStatus("Aplikasi siap");
+      window.setTimeout(() => setStatus(""), 1800);
+    } catch (error) {
+      setStartupError(error.message || "Startup gagal");
+    } finally {
+      setIsRunningStartup(false);
+    }
+  }, [adminUser, isRunningStartup]);
+
   const loadDriveAuthStatus = async () => {
     try {
       const response = await fetch(`${API_URL}/auth/drive/status`, {
@@ -3214,10 +3778,13 @@ function App() {
       if (response.ok && data.success) {
         setDriveAuthStatus(data.drive);
         setDriveAuthError("");
+        return data.drive;
       }
     } catch {
       setDriveAuthStatus(null);
     }
+
+    return null;
   };
 
   const handleConnectDriveAuth = async () => {
@@ -3255,6 +3822,10 @@ function App() {
 
   const handleGoogleLogout = () => {
     setAdminUser(null);
+    setStartupComplete(false);
+    setStartupError("");
+    setStartupAttempted(false);
+    setStartupChecks([]);
     setAdminAuthError("");
     googleLogout();
   };
@@ -3286,6 +3857,25 @@ function App() {
       setIsVerifyingGoogleToken(false);
     }
   };
+
+  useEffect(() => {
+    if (
+      adminUser &&
+      backendReady &&
+      !startupComplete &&
+      !isRunningStartup &&
+      !startupAttempted
+    ) {
+      runStartupChecks();
+    }
+  }, [
+    adminUser,
+    backendReady,
+    startupComplete,
+    isRunningStartup,
+    startupAttempted,
+    runStartupChecks,
+  ]);
 
   const watermarkPanel = (
     <div className="watermark-panel">
@@ -3505,34 +4095,131 @@ function App() {
       </div>
     </div>
   );
+  const photoboothStepItems = [
+    { step: 1, label: "Mulai" },
+    { step: 2, label: "Foto" },
+    { step: 3, label: "Edit" },
+    { step: 4, label: "Kirim" },
+  ].filter((item) => photoboothAdminSettings.editEnabled || item.step !== 3);
+  const photoboothCurrentStepIndex = Math.max(
+    0,
+    photoboothStepItems.findIndex((item) => item.step === photoboothStep)
+  );
+  const photoboothModeSummary = doubleStripEnabled
+    ? `${activePaperConfig.label} • 2 strip • ${photoboothCaptureCount} foto`
+    : `${activePaperConfig.label} • ${photoboothPhotoCount} foto`;
+  const captureProgressPercent =
+    photoboothCaptureCount > 0
+      ? Math.min(100, (captures.length / photoboothCaptureCount) * 100)
+      : 0;
 
-  return (
-    <div className="app">
-      {!backendReady && (
-        <div className="splash-screen">
-          <div className="splash-card">
-            <div className="splash-icon">
-              <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
-                <rect x="8" y="16" width="48" height="36" rx="4" stroke="#4fb286" strokeWidth="2" fill="none"/>
-                <circle cx="24" cy="34" r="6" stroke="#4fb286" strokeWidth="2" fill="none"/>
-                <rect x="18" y="28" width="12" height="12" rx="2" fill="#4fb286" opacity="0.2"/>
-                <path d="M36 30l8 8-8 8" stroke="#4fb286" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                <path d="M38 38h8" stroke="#4fb286" strokeWidth="2" strokeLinecap="round"/>
-              </svg>
+  if (!adminUser) {
+    return (
+      <div className="app app-gate">
+        <main className="app-gate-view">
+          <section className="admin-login-card app-login-card">
+            <img
+              className="login-company-logo"
+              src={sisikitaCompanyLogo}
+              alt="Sisikita Creative"
+            />
+            <span className="start-eyebrow">Event Booth Studio</span>
+            <h2>Login Aplikasi</h2>
+            <p>
+              Masuk dulu sebelum photobooth, auto upload, dan admin panel dibuka.
+            </p>
+            <div className={backendReady ? "auth-note" : "auth-error"}>
+              {backendReady
+                ? "Backend siap, login bisa dimulai."
+                : "Menunggu backend siap..."}
             </div>
-            <strong>Event Booth Studio</strong>
-            <span>Menyiapkan aplikasi...</span>
+            {adminAuthError && <div className="auth-error">{adminAuthError}</div>}
+            {isVerifyingGoogleToken && (
+              <div className="auth-note">Memverifikasi token Drive...</div>
+            )}
+            <button
+              type="button"
+              className="upload-button compact admin-local-login"
+              onClick={handleDriveAdminLogin}
+              disabled={!backendReady || isVerifyingGoogleToken}
+            >
+              {isVerifyingGoogleToken ? "Memeriksa Token..." : "Masuk dengan Token Drive"}
+            </button>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (!startupComplete) {
+    return (
+      <div className="app app-gate">
+        <main className="app-gate-view">
+          <section className="startup-card">
+            <div className="template-panel-header">
+              <div className="startup-brand">
+                <img src={sisikitaCompanyLogo} alt="Sisikita Creative" />
+                <span className="start-eyebrow">Startup Check</span>
+                <h2>Menyiapkan aplikasi</h2>
+                <span>Memastikan service, file, dan perangkat siap sebelum masuk.</span>
+              </div>
+              <button
+                type="button"
+                className="secondary-button compact"
+                onClick={handleGoogleLogout}
+                disabled={isRunningStartup}
+              >
+                Logout
+              </button>
+            </div>
             <div className="splash-loader">
               <div className="splash-loader-bar" />
             </div>
-            <small>Inisialisasi pertama, menginstall Python dependencies</small>
-          </div>
-        </div>
-      )}
+            <div className="startup-check-list">
+              {startupChecks.map((check) => (
+                <div className={`startup-check ${check.status}`} key={check.id}>
+                  <strong>{check.name}</strong>
+                  <span>{check.message}</span>
+                  {check.repair && check.status !== "ok" && (
+                    <small>{check.repair}</small>
+                  )}
+                </div>
+              ))}
+            </div>
+            {startupError && <div className="auth-error">{startupError}</div>}
+            <div className="admin-action-row">
+              <button
+                type="button"
+                className="upload-button compact"
+                onClick={runStartupChecks}
+                disabled={!backendReady || isRunningStartup}
+              >
+                {isRunningStartup ? "Memeriksa..." : "Cek Ulang"}
+              </button>
+              <button
+                type="button"
+                className="secondary-button compact"
+                onClick={() => setStartupComplete(true)}
+                disabled={isRunningStartup || hasBlockingStartupIssue}
+              >
+                Lanjutkan
+              </button>
+            </div>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app">
       <header className="topbar">
         <div className="app-brand">
-          <strong>Event Booth Studio</strong>
-          <span>Photobooth & Drive Delivery</span>
+          <img src={sisikitaCompanyLogo} alt="Sisikita Creative" />
+          <div>
+            <strong>Event Booth Studio</strong>
+            <span>Photobooth & Drive Delivery</span>
+          </div>
         </div>
         <div className="tabs" role="tablist" aria-label="Mode aplikasi">
           <button
@@ -3557,58 +4244,75 @@ function App() {
             Admin
           </button>
         </div>
-        <div className={backendReady ? "system-state online" : "system-state"}>
-          {backendReady ? "Ready" : "Starting"}
+        <div
+          className={[
+            "system-state",
+            "camera-menu-indicator",
+            cameraPreviewReady ? "online" : "",
+          ].join(" ")}
+          aria-label={
+            cameraPreviewReady ? "Kamera ready" : "Kamera belum ready"
+          }
+          title={cameraPreviewReady ? "Kamera ready" : "Kamera belum ready"}
+        >
+          <img src={cameraReadyWhiteLogo} alt="" />
         </div>
       </header>
 
       {activeView === "photobooth" ? (
         <main className="photobooth-view">
           <section className="photobooth-wizard">
+            <div className="photobooth-session-bar">
+              <div className="photobooth-step-track">
+                {photoboothStepItems.map((item, index) => (
+                  <div
+                    className={
+                      [
+                        "photobooth-step-chip",
+                        index < photoboothCurrentStepIndex ? "done" : "",
+                        index === photoboothCurrentStepIndex ? "active" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")
+                    }
+                    key={`photobooth-step-${item.step}`}
+                  >
+                    <strong>{index + 1}</strong>
+                    <span>{item.label}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="photobooth-session-summary">
+                <strong>{photoboothModeSummary}</strong>
+                <span>{photoboothDriveConfigured ? "Drive siap" : "Drive belum diatur"}</span>
+              </div>
+            </div>
 
             {photoboothStep === 1 && (
               <section className="step-panel photobooth-start-panel">
                 <div className="start-card">
-                  <span className="start-eyebrow">Sesi baru</span>
-                  <h1>Photobooth</h1>
-                  <p>
-                    Staff memulai sesi, kamera menghitung mundur 5 detik untuk
-                    Foto 1, lalu lanjut otomatis setiap 3 detik sesuai jumlah isi strip.
-                  </p>
-                  <div className="start-stats">
+                  <div className="start-copy">
+                    <h1>Mulai Photobooth</h1>
+                    <p>Sesi akan berjalan otomatis. Pastikan user sudah siap di depan kamera.</p>
+                  </div>
+                  <div className="start-photo-count">
                     <div>
-                      <strong>{captures.length}</strong>
-                      <span>foto terakhir</span>
-                    </div>
-                    <div>
-                      <strong>{photoQueue.length}</strong>
-                      <span>queue gdrive</span>
+                      <span>Jumlah foto</span>
+                      <strong>{photoboothCaptureCount}x</strong>
                     </div>
                   </div>
-                  <div className="session-checklist" aria-label="Status kesiapan">
-                    <span className={backendReady ? "ready" : ""}>
-                      Backend {backendReady ? "siap" : "belum siap"}
-                    </span>
-                    <span className={watermark?.active ? "ready" : ""}>
-                      Watermark {watermark?.active ? "aktif" : "opsional"}
-                    </span>
-                    <span className={photoboothTemplate?.active ? "ready" : ""}>
-                      Strip {photoboothTemplate?.active ? "custom" : "default"}
-                    </span>
-                  </div>
-                  <div className="booth-flow">
-                    <span>Start staff</span>
-                    <span>Auto capture</span>
-                    <span>Kirim Drive</span>
-                    <span>Cetak Strip</span>
+                  <div className="start-session-meta">
+                    <span>{activePaperConfig.label}</span>
+                    <span>{doubleStripEnabled ? "2 strip" : "1 strip"}</span>
+                    <span>{photoboothAdminSettings.autoPrintEnabled ? "Auto print" : "Tanpa print"}</span>
                   </div>
                   <button
                     type="button"
-                    className="upload-button compact"
+                    className="upload-button compact start-session-button"
                     onClick={handleStartPhotoboothSession}
-                    disabled={!backendReady}
+                    disabled={!backendReady || !photoboothDriveConfigured}
                   >
-                    Mulai Sesi
+                    {photoboothDriveConfigured ? "Mulai Sesi" : "Isi Drive ID di Admin"}
                   </button>
                 </div>
               </section>
@@ -3619,167 +4323,174 @@ function App() {
 
                 <div className="capture-strip-panel" aria-label="Preview strip otomatis">
                   <div className="capture-strip-header">
+                    <div className="capture-session-copy">
+                      <strong>
+                        {captures.length >= photoboothCaptureCount
+                          ? "Semua foto selesai"
+                          : `Foto ${captures.length + 1}`}
+                      </strong>
+                      <span>
+                        {showResult
+                          ? "Preview hasil foto sebentar..."
+                          : autoCaptureCountdown !== null
+                            ? "Tahan posisi sampai kamera mengambil foto."
+                            : "Arahkan wajah ke kamera dan tunggu hitungan."}
+                      </span>
+                    </div>
                     <div className="capture-photo-counter">
                       <strong>
-                        {captures.length >= photoboothPhotoCount
+                        {captures.length >= photoboothCaptureCount
                           ? "Selesai"
                           : `${captures.length + 1}`}
                       </strong>
-                      <span>/ {photoboothPhotoCount}</span>
+                      <span>/ {photoboothCaptureCount}</span>
                     </div>
                   </div>
-                  <div
-                    className="capture-strip-scroll"
-                    ref={captureStripScrollRef}
-                  >
-                    <div
-                      className={
-                        [
-                          "photobooth-template-preview",
-                          "capture-template-preview",
-                          hasUploadedTemplateLayout ? "uploaded-template-preview" : "",
-                        ]
-                          .filter(Boolean)
-                          .join(" ")
-                      }
-                      style={capturePhotoboothPreviewStyle}
-                    >
-                      {activePhotoboothTemplateSlots.slice(0, photoboothPhotoCount).map((slot, index) => {
-                        const capture = photoboothSlotCaptures[index];
-                        const adjustment =
-                          templatePhotoAdjustments[index] ||
-                          DEFAULT_SLOT_ADJUSTMENT;
-                        const savedEffect = getPhotoboothEffect(photoEffectMap[index]);
-                        const isUpcoming =
-                          !capture &&
-                          index === Math.min(captures.length, photoboothPhotoCount - 1);
-                        const slotStateLabel = capture
-                          ? "Selesai"
-                          : isUpcoming
-                            ? autoCaptureReady
-                              ? "Siap"
-                              : autoCaptureCountdown !== null
-                                ? "Countdown"
-                                : ""
-                            : "Kosong";
+                  <div className="capture-progress">
+                    <span style={{ width: `${captureProgressPercent}%` }} />
+                  </div>
+                  <div className="capture-camera-wrap">
+                    <div className="capture-strip-background" aria-hidden="true">
+                      <div
+                        className={
+                          [
+                            "photobooth-template-preview",
+                            "capture-actual-ghost-preview",
+                            photoboothPreviewUsesUploadedTemplate ? "uploaded-template-preview" : "",
+                            doubleStripEnabled ? "double-strip-edit-preview" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")
+                        }
+                        style={
+                          doubleStripEnabled
+                            ? {
+                                aspectRatio: `${activePaperConfig.width} / ${activePaperConfig.height}`,
+                              }
+                            : activeStripPreviewStyle
+                        }
+                      >
+                        {(doubleStripEnabled ? [0, photoboothPhotoCount] : [0]).map(
+                          (photoOffset, sideIndex) => (
+                            <div
+                              className={
+                                doubleStripEnabled
+                                  ? "double-strip-preview-side"
+                                  : "capture-single-ghost-side"
+                              }
+                              key={`capture-strip-mini-${sideIndex}`}
+                            >
+                              {activePhotoboothTemplateSlots.slice(0, photoboothPhotoCount).map((slot, index) => {
+                                const mappedPhotoIndex = slotPhotoMap[index];
+                                const photoIndex =
+                                  mappedPhotoIndex === null || mappedPhotoIndex === undefined
+                                    ? null
+                                    : doubleStripEnabled
+                                      ? (mappedPhotoIndex % photoboothPhotoCount) + photoOffset
+                                      : mappedPhotoIndex;
+                                const capture = photoboothSlotCaptures[photoIndex];
+                                const adjustment =
+                                  templatePhotoAdjustments[index] ||
+                                  DEFAULT_SLOT_ADJUSTMENT;
+                                const savedEffect = getPhotoboothEffect(photoEffectMap[photoIndex]);
 
-                        return (
-                          <div
-                            data-capture-strip-slot={index}
-                            className={
-                              [
-                                "template-photo-slot",
-                                capture ? "filled" : "empty",
-                                isUpcoming ? "upcoming" : "",
-                              ]
-                                .filter(Boolean)
-                                .join(" ")
-                            }
-                            key={`capture-slot-${index}`}
-                            style={getPhotoboothTemplateSlotStyle(slot)}
-                          >
-                            <div className="capture-slot-badge">
-                              Foto {index + 1}
-                              {slotStateLabel && <small>{slotStateLabel}</small>}
+                                return (
+                                  <div
+                                    data-strip-slot={sideIndex === 0 ? index : undefined}
+                                    className={
+                                      [
+                                        "template-photo-slot",
+                                        capture ? "filled" : "",
+                                      ]
+                                        .filter(Boolean)
+                                        .join(" ")
+                                    }
+                                    key={`capture-strip-mini-slot-${sideIndex}-${index}`}
+                                    style={getPhotoboothTemplateSlotStyle(slot)}
+                                  >
+                                    {capture ? (
+                                      <img
+                                        src={`${capture.image_url}?v=${streamVersion}`}
+                                        alt=""
+                                        style={{
+                                          width: `${adjustment.scale}%`,
+                                          filter: savedEffect.filter,
+                                          left: `calc(50% + ${adjustment.x}%)`,
+                                          top: `calc(50% + ${adjustment.y}%)`,
+                                          transform: "translate(-50%, -50%)",
+                                        }}
+                                      />
+                                    ) : (
+                                      <span>{photoIndex !== null ? photoIndex + 1 : index + 1}</span>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
-                          {capture ? (
-                            <img
-                              src={`${capture.image_url}?v=${streamVersion}`}
-                              alt={capture.filename}
-                                style={{
-                                  width: `${adjustment.scale}%`,
-                                  filter: savedEffect.filter,
-                                  left: `calc(50% + ${adjustment.x}%)`,
-                                  top: `calc(50% + ${adjustment.y}%)`,
-                                  transform: "translate(-50%, -50%)",
-                                }}
-                              draggable={false}
-                            />
-                          ) : (
-                            <span className={isUpcoming ? "capture-slot-ready" : ""}>
-                              {`Foto ${index + 1}`}
-                            </span>
-                          )}
-                          </div>
-                        );
-                      })}
-                      {!showResult && captures.length < photoboothPhotoCount && (() => {
-                        const upcomingIndex = Math.min(captures.length, photoboothPhotoCount - 1);
-                        const slot = activePhotoboothTemplateSlots[upcomingIndex];
-                        return (
-                          <div
-                            key="camera-overlay"
-                            className="strip-camera-overlay"
-                            style={{
-                              ...getPhotoboothTemplateSlotStyle(slot),
-                              transform: 'translateZ(0)',
-                            }}
-                          >
-                            <video
-                              ref={attachCameraVideoElement}
-                              className={`strip-live-camera ${
-                                cameraPreviewSource === "backend" ? "camera-preview-hidden" : ""
-                              }`}
-                              autoPlay
-                              playsInline
-                              muted
-                              onCanPlay={handleBrowserCameraReady}
-                              onLoadedData={handleBrowserCameraReady}
-                              onPlaying={handleBrowserCameraReady}
-                            />
-                            {backendReady && cameraPreviewSource !== "browser" && (
-                              <img
-                                className="strip-live-camera"
-                                src={`${API_URL}/camera-stream?v=${streamVersion}`}
-                                alt=""
-                                onLoad={handleBackendCameraLoad}
-                                onError={handleBackendCameraError}
-                              />
-                            )}
-                            {!cameraActive && (
-                              <div className="strip-camera-empty">Kamera belum aktif</div>
-                            )}
-                          </div>
-                        );
-                      })()}
-                      {activePhotoboothTemplate?.active && activePhotoboothTemplate.image_url && (
+                          )
+                        )}
+                        {photoboothPreviewUsesUploadedTemplate && (
                           <img
                             src={
                               photoboothTemplateOverlayUrl ||
                               activePhotoboothTemplate.image_url
                             }
-                            alt="Template strip upload"
+                            alt=""
                             className="template-overlay"
                             draggable={false}
                           />
                         )}
-                      {!showResult && captures.length < photoboothPhotoCount && (() => {
-                        const upcomingIndex = Math.min(captures.length, photoboothPhotoCount - 1);
-                        const slot = activePhotoboothTemplateSlots[upcomingIndex];
-
-                        if (!slot) {
-                          return null;
-                        }
-
-                        return (
-                          <div
-                            key="capture-status-overlay"
-                            className="capture-status-overlay"
-                            style={getPhotoboothTemplateSlotStyle(slot)}
-                          >
-                            {autoCaptureReady ? (
-                              <div className="slot-countdown-overlay ready-overlay">
-                                <strong>Siap</strong>
-                                <span>Atur posisi</span>
-                              </div>
-                            ) : autoCaptureCountdown !== null ? (
-                              <div className="slot-countdown-overlay countdown-overlay">
-                                <strong>{autoCaptureCountdown}</strong>
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })()}
+                      </div>
+                    </div>
+                    <div className="capture-camera-frame">
+                      {showResult && latestCapture ? (
+                        <img
+                          className="capture-result-photo"
+                          src={`${latestCapture.image_url}?v=${streamVersion}`}
+                          alt={latestCapture.filename}
+                        />
+                      ) : (
+                        <>
+                          <video
+                            ref={attachCameraVideoElement}
+                            className={`capture-live-camera ${
+                              cameraPreviewSource === "backend" ? "camera-preview-hidden" : ""
+                            }`}
+                            autoPlay
+                            playsInline
+                            muted
+                            onCanPlay={handleBrowserCameraReady}
+                            onLoadedData={handleBrowserCameraReady}
+                            onPlaying={handleBrowserCameraReady}
+                          />
+                          {backendReady && cameraPreviewSource !== "browser" && (
+                            <img
+                              className="capture-live-camera"
+                              src={`${API_URL}/camera-stream?v=${streamVersion}`}
+                              alt=""
+                              onLoad={handleBackendCameraLoad}
+                              onError={handleBackendCameraError}
+                            />
+                          )}
+                          {!cameraActive && (
+                            <div className="capture-camera-empty">Kamera belum aktif</div>
+                          )}
+                        </>
+                      )}
+                      {!showResult && captures.length < photoboothCaptureCount && (
+                        <div className="capture-center-status">
+                          {autoCaptureReady ? (
+                            <div className="slot-countdown-overlay ready-overlay">
+                              <strong>Siap</strong>
+                              <span>Atur posisi</span>
+                            </div>
+                          ) : autoCaptureCountdown !== null ? (
+                            <div className="slot-countdown-overlay countdown-overlay">
+                              <strong>{autoCaptureCountdown}</strong>
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -3787,7 +4498,7 @@ function App() {
                 <div className="step-footer">
                   <div>
                     <strong>{captures.length}</strong>
-                    <span>foto tersimpan</span>
+                    <span>{Math.max(0, photoboothCaptureCount - captures.length)} foto lagi</span>
                   </div>
                   <div className="footer-actions">
                     <button
@@ -3804,7 +4515,7 @@ function App() {
                         setPhotoboothEditMode("strip");
                         setPhotoboothStep(photoboothAdminSettings.editEnabled ? 3 : 4);
                       }}
-                      disabled={captures.length < photoboothPhotoCount}
+                      disabled={captures.length < photoboothCaptureCount}
                     >
                       Lanjut Kirim
                     </button>
@@ -4035,8 +4746,10 @@ function App() {
                         </h2>
                         <p>
                           {photoboothEditMode === "photo"
-                            ? "Preview efek untuk foto yang sedang dipilih."
-                            : `Strip final berisi ${photoboothPhotoCount} foto sesuai pilihan admin.`}
+                            ? "Pilih efek yang paling cocok sebelum masuk ke strip."
+                            : doubleStripEnabled
+                              ? `Strip final berisi ${photoboothCaptureCount} foto berbeda dalam 2 strip.`
+                              : `Strip final berisi ${photoboothPhotoCount} foto sesuai pilihan admin.`}
                         </p>
                       </div>
                     </div>
@@ -4049,7 +4762,7 @@ function App() {
                             style={{ filter: draftEffect.filter }}
                           />
                         ) : (
-                          <span>{`Ambil ${photoboothPhotoCount} foto dulu untuk mulai edit.`}</span>
+                          <span>{`Ambil ${photoboothCaptureCount} foto dulu untuk mulai edit.`}</span>
                         )}
                       </div>
                     ) : (
@@ -4057,68 +4770,136 @@ function App() {
                         className={
                           [
                             "photobooth-template-preview",
-                            hasUploadedTemplateLayout ? "uploaded-template-preview" : "",
+                            photoboothPreviewUsesUploadedTemplate ? "uploaded-template-preview" : "",
+                            doubleStripEnabled ? "double-strip-edit-preview" : "",
                           ]
                             .filter(Boolean)
                             .join(" ")
                         }
                         style={editPhotoboothPreviewStyle}
                       >
-                        {activePhotoboothTemplateSlots.slice(0, photoboothPhotoCount).map((slot, index) => {
-                          const photoIndex = slotPhotoMap[index];
-                          const capture = photoboothSlotCaptures[photoIndex];
-                          const adjustment =
-                            templatePhotoAdjustments[index] ||
-                            DEFAULT_SLOT_ADJUSTMENT;
-                          const savedEffect = getPhotoboothEffect(photoEffectMap[photoIndex]);
-
-                          return (
+                        {doubleStripEnabled
+                          ? [0, photoboothPhotoCount].map((photoOffset, sideIndex) => (
                               <div
-                                data-strip-slot={index}
-                                className={
-                                  [
-                                  "template-photo-slot",
-                                  selectedTemplateSlot === index ? "active" : "",
-                                  capture ? "filled" : "empty",
-                                ]
-                                  .filter(Boolean)
-                                  .join(" ")
-                              }
-                              key={`slot-${index}`}
-                              onClick={() => setSelectedTemplateSlot(index)}
-                              onDragOver={(event) => event.preventDefault()}
-                              onDrop={(event) => handleStripSlotDrop(event, index)}
-                              onPointerDown={(event) =>
-                                handleStripSlotPointerDown(event, index)
-                              }
-                              onPointerMove={(event) =>
-                                handleStripSlotPointerMove(event, index)
-                              }
-                              onPointerUp={handleStripSlotPointerUp}
-                              onPointerCancel={handleStripSlotPointerUp}
-                              onWheel={(event) => handleStripSlotWheel(event, index)}
-                              style={getPhotoboothTemplateSlotStyle(slot)}
-                            >
-                              {capture ? (
-                                <img
-                                  src={`${capture.image_url}?v=${streamVersion}`}
-                                  alt={capture.filename}
-                                  style={{
-                                    width: `${adjustment.scale}%`,
-                                    filter: savedEffect.filter,
-                                    left: `calc(50% + ${adjustment.x}%)`,
-                                    top: `calc(50% + ${adjustment.y}%)`,
-                                    transform: "translate(-50%, -50%)",
-                                  }}
-                                  draggable={false}
-                                />
-                              ) : (
-                                <span>Kotak {index + 1}</span>
-                              )}
-                            </div>
-                            );
-                          })}
-                        {activePhotoboothTemplate?.active && activePhotoboothTemplate.image_url && (
+                                className="double-strip-preview-side"
+                                key={`double-preview-side-${sideIndex}`}
+                              >
+                                {activePhotoboothTemplateSlots.slice(0, photoboothPhotoCount).map((slot, index) => {
+                                  const mappedPhotoIndex = slotPhotoMap[index];
+                                  const photoIndex =
+                                    mappedPhotoIndex === null || mappedPhotoIndex === undefined
+                                      ? null
+                                      : (mappedPhotoIndex % photoboothPhotoCount) + photoOffset;
+                                  const capture = photoboothSlotCaptures[photoIndex];
+                                  const adjustment =
+                                    templatePhotoAdjustments[index] ||
+                                    DEFAULT_SLOT_ADJUSTMENT;
+                                  const savedEffect = getPhotoboothEffect(photoEffectMap[photoIndex]);
+                                  const isEditableSide = sideIndex === 0;
+
+                                  return (
+                                    <div
+                                      data-strip-slot={isEditableSide ? index : undefined}
+                                      className={
+                                        [
+                                          "template-photo-slot",
+                                          isEditableSide && selectedTemplateSlot === index ? "active" : "",
+                                          capture ? "filled" : "empty",
+                                        ]
+                                          .filter(Boolean)
+                                          .join(" ")
+                                      }
+                                      key={`double-slot-${sideIndex}-${index}`}
+                                      onClick={isEditableSide ? () => setSelectedTemplateSlot(index) : undefined}
+                                      onDragOver={isEditableSide ? (event) => event.preventDefault() : undefined}
+                                      onDrop={isEditableSide ? (event) => handleStripSlotDrop(event, index) : undefined}
+                                      onPointerDown={isEditableSide ? (event) =>
+                                        handleStripSlotPointerDown(event, index) : undefined
+                                      }
+                                      onPointerMove={isEditableSide ? (event) =>
+                                        handleStripSlotPointerMove(event, index) : undefined
+                                      }
+                                      onPointerUp={isEditableSide ? handleStripSlotPointerUp : undefined}
+                                      onPointerCancel={isEditableSide ? handleStripSlotPointerUp : undefined}
+                                      onWheel={isEditableSide ? (event) => handleStripSlotWheel(event, index) : undefined}
+                                      style={getPhotoboothTemplateSlotStyle(slot)}
+                                    >
+                                      {capture ? (
+                                        <img
+                                          src={`${capture.image_url}?v=${streamVersion}`}
+                                          alt={capture.filename}
+                                          style={{
+                                            width: `${adjustment.scale}%`,
+                                            filter: savedEffect.filter,
+                                            left: `calc(50% + ${adjustment.x}%)`,
+                                            top: `calc(50% + ${adjustment.y}%)`,
+                                            transform: "translate(-50%, -50%)",
+                                          }}
+                                          draggable={false}
+                                        />
+                                      ) : (
+                                        <span>Foto {photoIndex !== null ? photoIndex + 1 : index + 1}</span>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ))
+                          : activePhotoboothTemplateSlots.slice(0, photoboothPhotoCount).map((slot, index) => {
+                              const photoIndex = slotPhotoMap[index];
+                              const capture = photoboothSlotCaptures[photoIndex];
+                              const adjustment =
+                                templatePhotoAdjustments[index] ||
+                                DEFAULT_SLOT_ADJUSTMENT;
+                              const savedEffect = getPhotoboothEffect(photoEffectMap[photoIndex]);
+
+                              return (
+                                  <div
+                                    data-strip-slot={index}
+                                    className={
+                                      [
+                                      "template-photo-slot",
+                                      selectedTemplateSlot === index ? "active" : "",
+                                      capture ? "filled" : "empty",
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" ")
+                                  }
+                                  key={`slot-${index}`}
+                                  onClick={() => setSelectedTemplateSlot(index)}
+                                  onDragOver={(event) => event.preventDefault()}
+                                  onDrop={(event) => handleStripSlotDrop(event, index)}
+                                  onPointerDown={(event) =>
+                                    handleStripSlotPointerDown(event, index)
+                                  }
+                                  onPointerMove={(event) =>
+                                    handleStripSlotPointerMove(event, index)
+                                  }
+                                  onPointerUp={handleStripSlotPointerUp}
+                                  onPointerCancel={handleStripSlotPointerUp}
+                                  onWheel={(event) => handleStripSlotWheel(event, index)}
+                                  style={getPhotoboothTemplateSlotStyle(slot)}
+                                >
+                                  {capture ? (
+                                    <img
+                                      src={`${capture.image_url}?v=${streamVersion}`}
+                                      alt={capture.filename}
+                                      style={{
+                                        width: `${adjustment.scale}%`,
+                                        filter: savedEffect.filter,
+                                        left: `calc(50% + ${adjustment.x}%)`,
+                                        top: `calc(50% + ${adjustment.y}%)`,
+                                        transform: "translate(-50%, -50%)",
+                                      }}
+                                      draggable={false}
+                                    />
+                                  ) : (
+                                    <span>Kotak {index + 1}</span>
+                                  )}
+                                </div>
+                                );
+                              })}
+                        {photoboothPreviewUsesUploadedTemplate && (
                             <img
                               src={
                                 photoboothTemplateOverlayUrl ||
@@ -4151,7 +4932,7 @@ function App() {
                       className="upload-button compact"
                       onClick={() => setPhotoboothStep(4)}
                       disabled={
-                        captures.length < photoboothPhotoCount ||
+                        captures.length < photoboothCaptureCount ||
                         filledStripSlotCount < activeStripSlots.length
                       }
                     >
@@ -4168,7 +4949,7 @@ function App() {
                   <div className="template-panel-header">
                     <div>
                       <h2>Hasil Photobooth</h2>
-                      <span>Preview ini memakai render yang sama dengan file Google Drive.</span>
+                      <span>Hasil ini akan masuk ke Google Drive dan printer.</span>
                     </div>
                   </div>
                   <div className="final-strip-render">
@@ -4181,7 +4962,7 @@ function App() {
                       <span>
                         {isRenderingPhotoboothPreview
                           ? "Membuat preview hasil..."
-                          : `Preview hasil akan muncul setelah ${photoboothPhotoCount} foto siap.`}
+                          : `Preview hasil akan muncul setelah ${photoboothCaptureCount} foto siap.`}
                       </span>
                     )}
                   </div>
@@ -4190,7 +4971,7 @@ function App() {
                   <div className="template-panel-header">
                     <div>
                       <h2>Upload ke Google Drive</h2>
-                      <span>Folder dibuat otomatis setiap sesi selesai.</span>
+                      <span>{photoboothDriveResult ? "Folder siap untuk user." : "Sedang menyiapkan folder user."}</span>
                     </div>
                   </div>
                   {isUploadingPhotoboothDrive ? (
@@ -4244,6 +5025,7 @@ function App() {
                 </div>
               </section>
             )}
+
           </section>
         </main>
       ) : activeView === "upload" ? (
@@ -4285,6 +5067,14 @@ function App() {
                 <strong>3</strong>
                 Upload Drive
               </button>
+              <button
+                type="button"
+                className={uploadStep === 4 ? "step-tab active" : "step-tab"}
+                onClick={() => setUploadStep(4)}
+              >
+                <strong>4</strong>
+                Preview Upload
+              </button>
             </div>
 
             {uploadStep === 1 && (
@@ -4316,7 +5106,7 @@ function App() {
                       onDrop={handleDropFiles}
                     >
                       <strong>Letakkan file di sini</strong>
-                      <span>JPG atau JPEG akan masuk ke daftar terpilih</span>
+                      <span>JPG, JPEG, atau PNG akan masuk ke daftar terpilih</span>
                     </div>
                     <div className="source-button-grid">
                       <button
@@ -4472,7 +5262,7 @@ function App() {
                   {selectedUploadCount === 0 ? (
                     <div className="empty-state">
                       {uploadInputMode === "folder"
-                        ? "Folder aktif, menunggu file JPG baru"
+                        ? "Folder aktif, menunggu file gambar baru"
                         : "Belum ada file dipilih"}
                     </div>
                   ) : (
@@ -4522,64 +5312,66 @@ function App() {
 
             {uploadStep === 2 && (
               <section className="step-panel edit-step-panel">
-                <div className="edit-layout">
-                  {watermarkPanel}
+                <div className="edit-scroll-region">
+                  <div className="edit-layout">
+                    {watermarkPanel}
 
-                  <div className="preview-panel inline-preview">
-                    <div className="auto-preview-header">
-                      <div>
-                        <h2>Preview Otomatis</h2>
-                        <p>
-                          Mengikuti orientasi yang dipilih dan menampilkan gambar utuh.
-                        </p>
+                    <div className="preview-panel inline-preview">
+                      <div className="auto-preview-header">
+                        <div>
+                          <h2>Preview Otomatis</h2>
+                          <p>
+                            Mengikuti orientasi yang dipilih dan menampilkan gambar utuh.
+                          </p>
+                        </div>
+                        <span>
+                          {autoPreviewInfo
+                            ? `${autoPreviewInfo.orientationLabel} ${autoPreviewInfo.width} x ${autoPreviewInfo.height} px`
+                            : "Belum ada gambar"}
+                        </span>
                       </div>
-                      <span>
-                        {autoPreviewInfo
-                          ? `${autoPreviewInfo.orientationLabel} ${autoPreviewInfo.width} x ${autoPreviewInfo.height} px`
-                          : "Belum ada gambar"}
-                      </span>
-                    </div>
-                    <div className="auto-preview-stage">
-                      {autoPreviewUrl ? (
-                        <div
-                          className={
-                            previewWatermarkSettings.fit === "frame"
-                              ? "auto-preview-canvas frame-preview"
-                              : "auto-preview-canvas"
-                          }
-                        >
-                          <img
-                            src={autoPreviewUrl}
-                            alt="Preview file upload"
-                            className="auto-preview-image"
-                          />
-                          {previewWatermarkSettings.fit === "frame" && (
+                      <div className="auto-preview-stage">
+                        {autoPreviewUrl ? (
+                          <div
+                            className={
+                              previewWatermarkSettings.fit === "frame"
+                                ? "auto-preview-canvas frame-preview"
+                                : "auto-preview-canvas"
+                            }
+                          >
                             <img
                               src={autoPreviewUrl}
-                              alt=""
-                              className="auto-preview-frame-photo"
-                              style={getFramePreviewPhotoStyle()}
+                              alt="Preview file upload"
+                              className="auto-preview-image"
                             />
-                          )}
-                          {activeWatermarkItems.map((item) => (
-                            <img
-                              key={item.id}
-                              src={item.image_url}
-                              alt={item.name}
-                              className="auto-preview-watermark"
-                              style={{
-                                ...getPreviewWatermarkStyle(),
-                                opacity:
-                                  previewWatermarkSettings.fit === "frame"
-                                    ? 1
-                                    : item.opacity / 100,
-                              }}
-                            />
-                          ))}
-                        </div>
-                      ) : (
-                        <span>Pilih file gambar untuk melihat preview.</span>
-                      )}
+                            {previewWatermarkSettings.fit === "frame" && (
+                              <img
+                                src={autoPreviewUrl}
+                                alt=""
+                                className="auto-preview-frame-photo"
+                                style={getFramePreviewPhotoStyle()}
+                              />
+                            )}
+                            {activeWatermarkItems.map((item) => (
+                              <img
+                                key={item.id}
+                                src={item.image_url}
+                                alt={item.name}
+                                className="auto-preview-watermark"
+                                style={{
+                                  ...getPreviewWatermarkStyle(),
+                                  opacity:
+                                    previewWatermarkSettings.fit === "frame"
+                                      ? 1
+                                      : item.opacity / 100,
+                                }}
+                              />
+                            ))}
+                          </div>
+                        ) : (
+                          <span>Pilih file gambar untuk melihat preview.</span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -4741,6 +5533,102 @@ function App() {
                 </section>
               </section>
             )}
+
+            {uploadStep === 4 && (
+              <section className="step-panel upload-preview-step-panel">
+                {uploadPreviewItems.length > 0 ? (
+                  <section className="watch-upload-preview expanded">
+                    <div className="watch-preview-header">
+                      <div>
+                        <h2>
+                          {uploadProgress.source === "folder"
+                            ? "Preview Upload Watcher"
+                            : "Preview Upload"}
+                        </h2>
+                        <span>
+                          {uploadPreviewSummary.total} file dalam batch terakhir
+                        </span>
+                      </div>
+                      <div className="watch-preview-counters">
+                        <span>
+                          <strong>{uploadPreviewSummary.uploaded}</strong>
+                          Upload
+                        </span>
+                        <span>
+                          <strong>{uploadPreviewSummary.processing}</strong>
+                          Proses
+                        </span>
+                        <span>
+                          <strong>{uploadPreviewSummary.pending}</strong>
+                          Tunggu
+                        </span>
+                        <span className={uploadPreviewSummary.failed > 0 ? "counter-alert" : ""}>
+                          <strong>{uploadPreviewSummary.failed}</strong>
+                          Gagal
+                        </span>
+                      </div>
+                    </div>
+                    <div className="watch-preview-list">
+                      {uploadPreviewItems.map((item) => (
+                        <div className="watch-preview-item" key={item.id}>
+                          <div className="watch-preview-thumb">
+                            {item.image_url ? (
+                              <img src={item.image_url} alt={item.name} />
+                            ) : (
+                              <span>{item.name.slice(0, 1).toUpperCase()}</span>
+                            )}
+                          </div>
+                          <div className="watch-preview-copy">
+                            <strong>{item.name}</strong>
+                            <span>
+                              {item.size ? `${Math.ceil(item.size / 1024)} KB` : item.meta}
+                            </span>
+                            {item.error && <small>{item.error}</small>}
+                          </div>
+                          <strong className={`queue-status ${item.status}`}>
+                            {getQueueStatusLabel(item.status)}
+                          </strong>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                ) : (
+                  <section className="watch-upload-preview expanded empty-preview">
+                    <div className="watch-preview-header">
+                      <div>
+                        <h2>Preview Upload</h2>
+                        <span>Belum ada batch upload untuk dipreview.</span>
+                      </div>
+                    </div>
+                    <div className="empty-state">
+                      Jalankan upload dari Folder Watcher atau User Upload dulu.
+                    </div>
+                  </section>
+                )}
+                <div className="step-footer">
+                  <div>
+                    <strong>{uploadPreviewSummary.total}</strong>
+                    <span>file batch terakhir</span>
+                  </div>
+                  <div className="footer-actions">
+                    <button
+                      type="button"
+                      className="secondary-button compact"
+                      onClick={() => setUploadStep(3)}
+                    >
+                      Kembali Upload Drive
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button compact"
+                      onClick={() => setUploadStep(1)}
+                    >
+                      Pilih Sumber
+                    </button>
+                  </div>
+                </div>
+              </section>
+            )}
           </section>
         </main>
       ) : !adminUser ? (
@@ -4793,23 +5681,6 @@ function App() {
                     Logout ({adminUser.email})
                   </button>
                 </div>
-              </div>
-              <div className="admin-status-strip">
-                <span className={backendReady ? "ready" : ""}>
-                  Backend {backendReady ? "online" : "starting"}
-                </span>
-                <span className={cameraPreviewReady ? "ready" : ""}>
-                  Kamera {cameraPreviewReady ? "preview siap" : "standby"}
-                </span>
-                <span className={photoboothTemplate?.active ? "ready" : ""}>
-                  Strip {photoboothTemplate?.active ? "custom" : "default"}
-                </span>
-                <span className={watermark?.active ? "ready" : ""}>
-                  Watermark {watermark?.active ? "aktif" : "opsional"}
-                </span>
-                <span className={driveAuthReady ? "ready" : ""}>
-                  Drive {driveAuthReady ? "connected" : "auth needed"}
-                </span>
               </div>
             </section>
 
@@ -4893,20 +5764,20 @@ function App() {
                     onChange={(event) =>
                       setPhotoboothAdminSettings((current) => ({
                         ...current,
-                        initialDriveFolderId: event.target.value,
+                        initialDriveFolderId: event.target.value.trim(),
                       }))
                     }
-                    placeholder="Kosongkan untuk Drive default"
+                    placeholder="Masukkan Folder ID Google Drive"
                   />
                 </label>
                 <div className="admin-setting-note">
                   <strong>
                     {photoboothAdminSettings.initialDriveFolderId.trim()
-                      ? "Custom"
-                      : "Default"}
+                      ? "Siap"
+                      : "Wajib"}
                   </strong>
                   <span>
-                    Setiap upload photobooth akan membuat folder user di dalam drive awal ini.
+                    Photobooth baru bisa mulai setelah Drive Folder ID ini terisi.
                   </span>
                 </div>
                 <div className="admin-action-row">
@@ -4916,7 +5787,7 @@ function App() {
                     onClick={() =>
                       setPhotoboothAdminSettings((current) => ({
                         ...current,
-                        initialDriveFolderId: driveFolderId,
+                        initialDriveFolderId: driveFolderId.trim(),
                       }))
                     }
                     disabled={!driveFolderId.trim()}
@@ -4934,7 +5805,7 @@ function App() {
                     }
                     disabled={!photoboothAdminSettings.initialDriveFolderId.trim()}
                   >
-                    Reset Drive
+                    Kosongkan
                   </button>
                 </div>
               </section>
@@ -4980,6 +5851,20 @@ function App() {
                         ))}
                       </select>
                     </label>
+                    <label className="admin-input-field">
+                      Nama Printer Manual
+                      <input
+                        type="text"
+                        value={photoboothAdminSettings.printerName}
+                        onChange={(event) =>
+                          setPhotoboothAdminSettings((current) => ({
+                            ...current,
+                            printerName: event.target.value,
+                          }))
+                        }
+                        placeholder="Contoh: Canon_CP1500"
+                      />
+                    </label>
                     <div className="admin-action-row">
                       <button
                         type="button"
@@ -5010,15 +5895,65 @@ function App() {
                   </strong>
                   <span>
                     {photoboothAdminSettings.autoPrintEnabled
-                      ? `Cetak ke ${photoboothAdminSettings.printerName || "— pilih printer dulu"}.`
+                      ? `Cetak ${String(photoboothAdminSettings.paperSize || "4r").toUpperCase()} ke ${photoboothAdminSettings.printerName || "— pilih printer dulu"}.`
                       : "Strip tidak akan dicetak otomatis."}
+                  </span>
+                </div>
+              </section>
+
+              <section className="admin-card sparse admin-col-left">
+                <div className="template-panel-header">
+                  <div>
+                    <h2>Output File</h2>
+                    <span>Atur ukuran file photobooth dan auto upload sebelum upload Drive.</span>
+                  </div>
+                </div>
+                <label className="admin-input-field">
+                  Kualitas Output
+                  <select
+                    value={
+                      photoboothAdminSettings.outputCompressionEnabled
+                        ? String(photoboothAdminSettings.outputCompressionQuality)
+                        : "normal"
+                    }
+                    onChange={(event) => {
+                      const value = event.target.value;
+
+                      setPhotoboothAdminSettings((current) => ({
+                        ...current,
+                        outputCompressionEnabled: value !== "normal",
+                        outputCompressionQuality:
+                          value === "normal"
+                            ? current.outputCompressionQuality
+                            : normalizeCompressionQuality(value),
+                      }));
+                    }}
+                  >
+                    <option value="normal">Normal</option>
+                    {OUTPUT_COMPRESSION_QUALITIES.map((quality) => (
+                      <option key={quality} value={quality}>
+                        Kompres {quality}%
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="admin-setting-note" style={{ margin: 0 }}>
+                  <strong>
+                    {photoboothAdminSettings.outputCompressionEnabled
+                      ? `${photoboothAdminSettings.outputCompressionQuality}%`
+                      : "Normal"}
+                  </strong>
+                  <span>
+                    {photoboothAdminSettings.outputCompressionEnabled
+                      ? "Kualitas JPEG final untuk photobooth dan auto upload mengikuti angka pilihan."
+                      : "JPEG final photobooth dan auto upload disimpan kualitas tinggi."}
                   </span>
                 </div>
               </section>
               </div>
 
               <div className="admin-column admin-column-right">
-              <section className="admin-card admin-col-right">
+              <section className="admin-card admin-col-right admin-strip-card">
                 <div className="template-panel-header">
                   <div>
                     <h2>Isi Strip</h2>
@@ -5039,6 +5974,9 @@ function App() {
                         setPhotoboothAdminSettings((current) => ({
                           ...current,
                           stripPhotoCount: count,
+                          doubleStripEnabled:
+                            count >= 2 &&
+                            current.doubleStripEnabled,
                         }));
                       }}
                     >
@@ -5053,6 +5991,60 @@ function App() {
                     {photoboothTemplate?.active
                       ? `Template ${photoboothPhotoCount} slot tersimpan.`
                       : `Template default — ${photoboothPhotoCount} slot.`}
+                  </span>
+                </div>
+                <label className="admin-input-field">
+                  Ukuran Kertas
+                  <select
+                    value={photoboothAdminSettings.paperSize}
+                    onChange={(event) =>
+                      setPhotoboothAdminSettings((current) => ({
+                        ...current,
+                        paperSize: event.target.value,
+                        doubleStripEnabled:
+                          current.stripPhotoCount >= 2 && current.doubleStripEnabled,
+                      }))
+                    }
+                  >
+                    <option value="3r">3R</option>
+                    <option value="4r">4R</option>
+                  </select>
+                </label>
+                <div className="admin-setting-note">
+                  <strong>{activePaperConfig.label}</strong>
+                  <span>
+                    Default strip {activeStripBaseWidth} x {activeStripBaseHeight}px,
+                    rasio {photoboothPhotoCount === 1
+                      ? `landscape ${activePaperConfig.ratioLabel.split(":").reverse().join(":")}`
+                      : activePaperConfig.ratioLabel}.
+                  </span>
+                </div>
+                <label className="admin-input-field print-option-row">
+                  <span>Dua strip dalam 1 kertas</span>
+                  <input
+                    type="checkbox"
+                    checked={photoboothAdminSettings.doubleStripEnabled}
+                    onChange={() =>
+                      setPhotoboothAdminSettings((current) => ({
+                        ...current,
+                        doubleStripEnabled: !current.doubleStripEnabled,
+                        stripPhotoCount:
+                          current.doubleStripEnabled
+                            ? current.stripPhotoCount
+                            : Math.max(2, current.stripPhotoCount || 2),
+                      }))
+                    }
+                    disabled={!doubleStripAvailable && !photoboothAdminSettings.doubleStripEnabled}
+                  />
+                </label>
+                <div className="admin-setting-note">
+                  <strong>
+                    {doubleStripEnabled ? `${photoboothPhotoCount * 2} foto` : "Normal"}
+                  </strong>
+                  <span>
+                    {doubleStripEnabled
+                      ? `1 kertas ${activePaperConfig.label} berisi 2 strip, masing-masing ${photoboothPhotoCount} foto, dengan garis belah tengah.`
+                      : "Mode dua strip tersedia untuk 3R dan 4R mulai dari 2 foto."}
                   </span>
                 </div>
                 <div className="admin-asset-grid">

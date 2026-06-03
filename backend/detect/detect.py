@@ -15,7 +15,7 @@ AUTO_WATCH_CONFIG_FILE = os.path.join(BASE_DIR, "database", "auto_watch.json")
 AUTO_WATCH_LOCK = threading.Lock()
 AUTO_PROCESS_LOCK = threading.Lock()
 AUTO_PROCESSING_FILES = set()
-IMAGE_EXTENSIONS = (".jpg", ".jpeg")
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 
 def normalize_folder_path(folder_path):
@@ -145,16 +145,15 @@ def set_auto_watch_folder(folder_path, drive_folder_id=None):
     if not os.path.isdir(target_folder):
         raise ValueError(f"Folder tidak ditemukan: {target_folder}")
 
+    pending_files = list_folder_images(target_folder)
+
     return save_auto_watch_config(
         target_folder,
         drive_folder_id=drive_folder_id,
         enabled=True,
         auto_upload_enabled=False,
-        known_files=[
-            item["path"]
-            for item in list_folder_images(target_folder)
-        ],
-        pending_files=[]
+        known_files=[],
+        pending_files=pending_files
     )
 
 
@@ -371,7 +370,7 @@ class NewFileHandler(FileSystemEventHandler):
 
         path = event.src_path
 
-        # filter non jpg
+        # filter non-image files
         if not path.lower().endswith(IMAGE_EXTENSIONS):
             return
 
@@ -388,7 +387,7 @@ class NewFileHandler(FileSystemEventHandler):
             print("⚠️ File tidak stabil, skip")
             return
 
-        print("✅ JPG siap diproses")
+        print("✅ File gambar siap diproses")
 
         if self.source == "auto_upload":
             config = register_auto_watch_file(path)
