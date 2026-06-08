@@ -1,8 +1,39 @@
 {
-  "folder_path": "",
-  "drive_folder_id": "",
-  "enabled": false,
+  "folder_path": "/Users/a1/Desktop/untitled folder/untitled folder 9",
+  "drive_folder_id": "1cFTZd-YxEjFBb8n-4dg22efJZa68wdpU",
+  "enabled": true,
   "auto_upload_enabled": false,
   "known_files": [],
-  "pending_files": []
+  "pending_files": [
+    {
+      "path": "/Users/a1/Desktop/untitled folder/untitled folder 9/DSC02893 15.36.30 15.40.41.JPG",
+      "name": "DSC02893 15.36.30 15.40.41.JPG",
+      "size": 2108977,
+      "mtime": 1778556658.02
+    },
+    {
+      "path": "/Users/a1/Desktop/untitled folder/untitled folder 9/DSC02894 15.36.30 15.40.41.JPG",
+      "name": "DSC02894 15.36.30 15.40.41.JPG",
+      "size": 2190319,
+      "mtime": 1778556668.6000001
+    },
+    {
+      "path": "/Users/a1/Desktop/untitled folder/untitled folder 9/DSC02900 15.36.30 15.40.42.JPG",
+      "name": "DSC02900 15.36.30 15.40.42.JPG",
+      "size": 2301297,
+      "mtime": 1778556740.0800002
+    },
+    {
+      "path": "/Users/a1/Desktop/untitled folder/untitled folder 9/DSC02901 15.36.30 15.40.42.JPG",
+      "name": "DSC02901 15.36.30 15.40.42.JPG",
+      "size": 2291525,
+      "mtime": 1778556744.86
+    },
+    {
+      "path": "/Users/a1/Desktop/untitled folder/untitled folder 9/Screenshot 2026-05-19 at 23.15.51 15.36.30 15.40.42.png",
+      "name": "Screenshot 2026-05-19 at 23.15.51 15.36.30 15.40.42.png",
+      "size": 1106675,
+      "mtime": 1779207368.792721
+    }
+  ]
 }
