@@ -51,6 +51,8 @@ const args = [
   "--collect-submodules",
   "capture",
   "--collect-submodules",
+  "camera",
+  "--collect-submodules",
   "detect",
   "--collect-submodules",
   "upload",

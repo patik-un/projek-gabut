@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build && npm run prepare:backend && npm run build:backend",
+    "beforeBuildCommand": "npm run check:release && npm run build && npm run prepare:backend && npm run build:backend && npm run prepare:camera-bridges",
     "frontendDist": "../dist"
   },
   "app": {
@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' ipc: http://ipc.localhost; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8000 http://localhost:8000 ws://localhost:1421; img-src 'self' asset: data: blob: http://127.0.0.1:8000 https://lh3.googleusercontent.com; media-src 'self' blob: http://127.0.0.1:8000; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'none'"
     }
   },
   "bundle": {
@@ -32,7 +32,8 @@
     ],
     "resources": {
       "backend-bin/": "backend-bin",
-      "backend-seed/": "backend-seed"
+      "backend-seed/": "backend-seed",
+      "camera-bridges/": "camera-bridges"
     },
     "icon": [
       "icons/32x32.png",
@@ -43,7 +44,7 @@
     ],
     "macOS": {
       "entitlements": "entitlements.plist",
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "12.1"
     }
   }
 }

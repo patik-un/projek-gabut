@@ -67,8 +67,25 @@ frontend\src-tauri\target\release\bundle\nsis\
 - Seed data backend dari `frontend/src-tauri/backend-seed`
 - Watermark/template/config awal yang tersedia saat build
 
+## Update Aman
+
+Sebelum membuat installer update:
+
+1. Naikkan versi yang sama di `frontend/package.json`,
+   `frontend/src-tauri/tauri.conf.json`, dan `frontend/src-tauri/Cargo.toml`.
+2. Jangan pernah mengubah identifier `com.autophoto.eventbooth`. Identifier ini
+   menjaga agar update tetap memakai folder data pengguna yang sama.
+3. Jalankan `npm run check:release` dari folder `frontend`.
+4. Tutup aplikasi versi lama sebelum memasang update.
+
+Saat versi baru pertama kali dibuka, seed baru digabungkan ke folder data
+aplikasi tanpa menimpa konfigurasi, token, database, hasil foto, watermark, atau
+template pengguna. Status migrasi terakhir disimpan di
+`database/app_update_state.json`.
+
 ## Belum termasuk
 
+- Download/install update otomatis dari dalam aplikasi
 - Code signing macOS
 - Apple notarization
 - Windows code signing certificate

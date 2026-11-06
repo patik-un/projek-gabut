@@ -5,12 +5,17 @@ __pycache__/
 
 # OAuth
 token.pickle
+token.json
 client_secret.json
 backend/auth/token.pickle
+backend/auth/token.json
+backend/auth/client_secrets.json
 
 # Database
 queue.db
 *.db
+auto_watch.json.lock
+auto_watch.json.commit.lock
 
 # PyInstaller
 backend/dist/
@@ -33,6 +38,7 @@ frontend/src-tauri/backend/
 frontend/src-tauri/backend-bin/
 frontend/src-tauri/backend-seed/
 frontend/src-tauri/backend-source/
+frontend/src-tauri/camera-bridges/
 frontend/src-tauri/output/
 frontend/src-tauri/processed/
 frontend/src-tauri/photobooth_strips/
@@ -49,3 +55,17 @@ frontend/src-tauri/photobooth_strips/
 .vscode/
 *.swp
 *.swo
+
+# Native camera bridge builds
+backend/camera/native/*/build/
+backend/camera/native/*/vendor/
+
+# Local reference copies and editor backups
+/github_reference/
+/projek-gabut-main/
+/programming-tauri/
+*.backup*
+/temp_app.jsx
+/analyze_jsx.py
+/skill_creation_todo.md
+/tauri-baseline-scenario.md

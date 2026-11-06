@@ -1,8 +1,10 @@
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance
+import numpy as np
 import os
 import time
 import threading
 import json
+import gc
 
 from queue_db import add_to_queue
 from runtime_paths import get_backend_dir
@@ -438,6 +440,432 @@ def apply_uploaded_watermark(image):
 
 
 # =========================
+# PHOTO EDIT PIPELINE (EDIT & OPTIMASI)
+# =========================
+DEFAULT_PHOTO_EDIT_SETTINGS = {
+    "brightness": 100,
+    "contrast": 100,
+    "saturation": 100,
+    "sharpness": 0,
+    "filter": "none",
+    "resize_mode": "keep",
+    "width": None,
+    "height": None,
+    "rotation": 0,
+    "flip_h": False,
+    "flip_v": False,
+    "crop": None,
+    "temperature": 0,
+    "tint": 0,
+    "vignette": 0,
+    "text_overlays": [],
+}
+
+PHOTO_FILTER_IDS = {
+    "none", "grayscale", "sepia", "vintage", "noir",
+    "cool", "warm", "vivid", "faded",
+}
+
+PHOTO_RESIZE_MODES = {"keep", "width", "height", "stretch", "cover", "contain"}
+
+TEXT_OVERLAY_FONTS = {
+    "arial": [
+        "/Library/Fonts/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "Arial.ttf",
+    ],
+    "helvetica": [
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+        "Helvetica.ttc",
+    ],
+    "verdana": [
+        "/Library/Fonts/Verdana.ttf",
+        "/System/Library/Fonts/Supplemental/Verdana.ttf",
+        "Verdana.ttf",
+    ],
+    "georgia": [
+        "/Library/Fonts/Georgia.ttf",
+        "/System/Library/Fonts/Supplemental/Georgia.ttf",
+        "Georgia.ttf",
+    ],
+    "times": [
+        "/Library/Fonts/Times New Roman.ttf",
+        "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+        "Times New Roman.ttf",
+    ],
+    "impact": [
+        "/Library/Fonts/Impact.ttf",
+        "/System/Library/Fonts/Supplemental/Impact.ttf",
+        "Impact.ttf",
+    ],
+    "courier": [
+        "/Library/Fonts/Courier New.ttf",
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+        "Courier New.ttf",
+    ],
+    "comic": [
+        "/Library/Fonts/Comic Sans MS.ttf",
+        "/System/Library/Fonts/Supplemental/Comic Sans MS.ttf",
+        "Comic Sans MS.ttf",
+    ],
+}
+
+
+def _clamp_edit_value(value, minimum, maximum, fallback, cast=int):
+    if value in (None, "", "null"):
+        return fallback
+    try:
+        number = cast(value)
+    except (TypeError, ValueError):
+        return fallback
+    return min(maximum, max(minimum, number))
+
+
+def _normalize_crop(value):
+    if value in (None, "", "null"):
+        return None
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return None
+    else:
+        parsed = value
+    if not isinstance(parsed, (list, tuple)) or len(parsed) != 4:
+        return None
+    x = _clamp_edit_value(parsed[0], 0, 1, 0, cast=float)
+    y = _clamp_edit_value(parsed[1], 0, 1, 0, cast=float)
+    crop_width = _clamp_edit_value(parsed[2], 0.01, 1, 1, cast=float)
+    crop_height = _clamp_edit_value(parsed[3], 0.01, 1, 1, cast=float)
+    crop_width = min(crop_width, 1 - x)
+    crop_height = min(crop_height, 1 - y)
+    if crop_width < 0.01 or crop_height < 0.01:
+        return None
+    return [x, y, crop_width, crop_height]
+
+
+def _normalize_text_overlays(value):
+    if value in (None, "", "null", []):
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return []
+    else:
+        parsed = value
+    if not isinstance(parsed, list):
+        return []
+
+    overlays = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        font = str(item.get("font") or "arial").lower()
+        if font not in TEXT_OVERLAY_FONTS:
+            font = "arial"
+        overlays.append({
+            "text": text,
+            "font": font,
+            "size": _clamp_edit_value(item.get("size"), 1, 100, 5),
+            "color": str(item.get("color") or "#ffffff"),
+            "opacity": _clamp_edit_value(item.get("opacity"), 0, 100, 100),
+            "x": _clamp_edit_value(item.get("x"), 0, 100, 50),
+            "y": _clamp_edit_value(item.get("y"), 0, 100, 50),
+            "align": item.get("align") if item.get("align") in {"left", "center", "right"} else "center",
+        })
+    return overlays
+
+
+def normalize_photo_edit_settings(settings=None):
+    settings = settings or {}
+    return {
+        "brightness": _clamp_edit_value(settings.get("brightness"), 0, 200, 100),
+        "contrast": _clamp_edit_value(settings.get("contrast"), 0, 200, 100),
+        "saturation": _clamp_edit_value(settings.get("saturation"), 0, 200, 100),
+        "sharpness": _clamp_edit_value(settings.get("sharpness"), -100, 100, 0),
+        "filter": settings.get("filter") if settings.get("filter") in PHOTO_FILTER_IDS else "none",
+        "resize_mode": settings.get("resize_mode") if settings.get("resize_mode") in PHOTO_RESIZE_MODES else "keep",
+        "width": _clamp_edit_value(settings.get("width"), 1, 20000, None),
+        "height": _clamp_edit_value(settings.get("height"), 1, 20000, None),
+        "rotation": _clamp_edit_value(settings.get("rotation"), -360, 360, 0),
+        "flip_h": settings.get("flip_h") in (True, 1, "1", "true", "True", "on"),
+        "flip_v": settings.get("flip_v") in (True, 1, "1", "true", "True", "on"),
+        "crop": _normalize_crop(settings.get("crop")),
+        "temperature": _clamp_edit_value(settings.get("temperature"), -100, 100, 0),
+        "tint": _clamp_edit_value(settings.get("tint"), -100, 100, 0),
+        "vignette": _clamp_edit_value(settings.get("vignette"), 0, 100, 0),
+        "text_overlays": _normalize_text_overlays(settings.get("text_overlays")),
+    }
+
+
+def apply_photo_enhance(image, settings):
+    output = image
+    if settings["brightness"] != 100:
+        output = ImageEnhance.Brightness(output).enhance(settings["brightness"] / 100)
+    if settings["contrast"] != 100:
+        output = ImageEnhance.Contrast(output).enhance(settings["contrast"] / 100)
+    if settings["saturation"] != 100:
+        output = ImageEnhance.Color(output).enhance(settings["saturation"] / 100)
+    if settings["sharpness"] != 0:
+        output = ImageEnhance.Sharpness(output).enhance(1 + settings["sharpness"] / 100)
+    return output
+
+
+def _sepia_image(image):
+    array = np.array(image.convert("RGB"), dtype=np.float32)
+    red = array[:, :, 0] * 0.393 + array[:, :, 1] * 0.769 + array[:, :, 2] * 0.189
+    green = array[:, :, 0] * 0.349 + array[:, :, 1] * 0.686 + array[:, :, 2] * 0.168
+    blue = array[:, :, 0] * 0.272 + array[:, :, 1] * 0.534 + array[:, :, 2] * 0.131
+    output = np.stack([red, green, blue], axis=2).clip(0, 255).astype(np.uint8)
+    return Image.fromarray(output)
+
+
+def apply_photo_filter(image, filter_id):
+    if filter_id == "grayscale":
+        return ImageOps.grayscale(image).convert("RGB")
+
+    if filter_id == "sepia":
+        return _sepia_image(image)
+
+    if filter_id == "noir":
+        gray = ImageOps.grayscale(image).convert("RGB")
+        return ImageEnhance.Contrast(gray).enhance(1.35)
+
+    if filter_id == "vintage":
+        sepia = _sepia_image(image)
+        return ImageEnhance.Contrast(ImageEnhance.Brightness(sepia).enhance(1.06)).enhance(0.92)
+
+    if filter_id == "warm":
+        color = ImageEnhance.Color(image).enhance(1.2)
+        return ImageEnhance.Brightness(Image.blend(color, _sepia_image(image), alpha=0.22)).enhance(1.04)
+
+    if filter_id == "cool":
+        color = np.array(ImageEnhance.Color(image).enhance(1.15).convert("RGB"), dtype=np.float32)
+        color[:, :, 0] = np.clip(color[:, :, 0] * 0.94, 0, 255)
+        color[:, :, 2] = np.clip(color[:, :, 2] * 1.06, 0, 255)
+        return Image.fromarray(color.astype(np.uint8))
+
+    if filter_id == "vivid":
+        return ImageEnhance.Contrast(ImageEnhance.Color(image).enhance(1.35)).enhance(1.08)
+
+    if filter_id == "faded":
+        output = ImageEnhance.Color(image).enhance(0.75)
+        output = ImageEnhance.Brightness(output).enhance(1.12)
+        return ImageEnhance.Contrast(output).enhance(0.88)
+
+    return image
+
+
+def apply_white_balance(image, temperature, tint):
+    if temperature == 0 and tint == 0:
+        return image
+
+    array = np.array(image.convert("RGB"), dtype=np.float32)
+    temperature_factor = temperature * 0.0012
+    tint_factor = tint * 0.0012
+
+    array[:, :, 0] *= 1 + temperature_factor + tint_factor
+    array[:, :, 1] *= 1 - tint_factor * 1.6
+    array[:, :, 2] *= 1 - temperature_factor + tint_factor
+
+    return Image.fromarray(array.clip(0, 255).astype(np.uint8))
+
+
+def apply_photo_transform(image, settings):
+    rotation = settings["rotation"] % 360
+
+    if rotation == 90:
+        image = image.transpose(Image.ROTATE_270)
+    elif rotation == 180:
+        image = image.transpose(Image.ROTATE_180)
+    elif rotation == 270:
+        image = image.transpose(Image.ROTATE_90)
+
+    if settings["flip_h"]:
+        image = image.transpose(Image.FLIP_LEFT_RIGHT)
+    if settings["flip_v"]:
+        image = image.transpose(Image.FLIP_TOP_BOTTOM)
+
+    return image
+
+
+def apply_photo_crop(image, crop):
+    if not crop:
+        return image
+
+    width, height = image.size
+    left = max(0, round(crop[0] * width))
+    top = max(0, round(crop[1] * height))
+    right = min(width, round((crop[0] + crop[2]) * width))
+    bottom = min(height, round((crop[1] + crop[3]) * height))
+
+    if right - left < 2 or bottom - top < 2:
+        return image
+
+    return image.crop((left, top, right, bottom))
+
+
+def apply_vignette(image, intensity):
+    if intensity <= 0:
+        return image
+
+    width, height = image.size
+    y_positions, x_positions = np.mgrid[0:height, 0:width]
+    dx = (x_positions - width / 2) / (width / 2)
+    dy = (y_positions - height / 2) / (height / 2)
+    distance = np.sqrt(dx * dx + dy * dy)
+    strength = np.clip((intensity / 100) * 1.25 * (distance - 0.35), 0, 1)
+    mask = Image.fromarray((strength * 255).astype(np.uint8), "L")
+    return Image.composite(Image.new("RGB", (width, height), (0, 0, 0)), image, mask)
+
+
+def _load_overlay_font(font_name, size):
+    candidates = TEXT_OVERLAY_FONTS.get(font_name, TEXT_OVERLAY_FONTS["arial"])
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
+
+def _parse_hex_color(value, fallback):
+    if not isinstance(value, str):
+        return fallback
+    color = value.strip().lstrip("#")
+    if len(color) == 3:
+        color = "".join(channel * 2 for channel in color)
+    if len(color) != 6:
+        return fallback
+    try:
+        return tuple(int(color[index:index + 2], 16) for index in (0, 2, 4))
+    except ValueError:
+        return fallback
+
+
+def apply_text_overlays(image, overlays):
+    if not overlays:
+        return image
+
+    draw = ImageDraw.Draw(image, "RGBA")
+    width, height = image.size
+
+    for overlay in overlays:
+        text = overlay.get("text") or ""
+        if not text:
+            continue
+
+        size = max(8, round(min(width, height) * overlay["size"] / 100))
+        font = _load_overlay_font(overlay["font"], size)
+        color = _parse_hex_color(overlay["color"], (255, 255, 255))
+        alpha = round(255 * overlay["opacity"] / 100)
+        x = width * overlay["x"] / 100
+        y = height * overlay["y"] / 100
+
+        if overlay["align"] == "left":
+            anchor = "lm"
+        elif overlay["align"] == "right":
+            anchor = "rm"
+        else:
+            anchor = "mm"
+
+        draw.text((x, y), text, font=font, fill=(*color, alpha), anchor=anchor)
+
+    return image
+
+
+def _cover_resize(image, width, height):
+    original_width, original_height = image.size
+    scale = max(width / original_width, height / original_height)
+    resized = image.resize(
+        (max(1, round(original_width * scale)), max(1, round(original_height * scale))),
+        Image.LANCZOS,
+    )
+    resized_width, resized_height = resized.size
+    left = (resized_width - width) // 2
+    top = (resized_height - height) // 2
+    return resized.crop((left, top, left + width, top + height))
+
+
+def resize_output_image(image, settings):
+    mode = settings["resize_mode"]
+    width = settings["width"]
+    height = settings["height"]
+
+    if mode == "keep" or (width is None and height is None):
+        return image
+
+    original_width, original_height = image.size
+
+    if mode == "width" and width:
+        scale = width / original_width
+        return image.resize((width, max(1, round(original_height * scale))), Image.LANCZOS)
+
+    if mode == "height" and height:
+        scale = height / original_height
+        return image.resize((max(1, round(original_width * scale)), height), Image.LANCZOS)
+
+    if mode == "stretch" and width and height:
+        return image.resize((width, height), Image.LANCZOS)
+
+    if mode == "contain" and width and height:
+        thumbnail = image.copy()
+        thumbnail.thumbnail((width, height), Image.LANCZOS)
+        return thumbnail
+
+    if mode == "cover" and width and height:
+        return _cover_resize(image, width, height)
+
+    return image
+
+
+def process_edit_image(input_path, output_dir=None, edit_settings=None):
+    settings = normalize_photo_edit_settings(edit_settings)
+    output_dir = output_dir or PROCESSED_FOLDER
+    os.makedirs(output_dir, exist_ok=True)
+
+    with Image.open(input_path) as opened:
+        image = ImageOps.exif_transpose(opened).convert("RGB")
+
+    image = apply_white_balance(image, settings["temperature"], settings["tint"])
+    image = apply_photo_enhance(image, settings)
+    image = apply_photo_filter(image, settings["filter"])
+    image = apply_photo_transform(image, settings)
+    image = apply_photo_crop(image, settings["crop"])
+    image = apply_vignette(image, settings["vignette"])
+    image = apply_text_overlays(image, settings["text_overlays"])
+    image = resize_output_image(image, settings)
+
+    watermark_applied = apply_uploaded_watermark(image)
+
+    base_name = os.path.splitext(os.path.basename(input_path))[0]
+    output_path = os.path.join(output_dir, f"edit_{int(time.time() * 1000)}_{base_name}.jpg")
+    jpeg_options = get_output_jpeg_options()
+    image.save(output_path, "JPEG", **jpeg_options)
+
+    print(
+        f"🖼️  Edit diproses -> {output_path} "
+        f"(watermark={watermark_applied}, q={jpeg_options.get('quality', 100)}, "
+        f"brightness={settings['brightness']}, contrast={settings['contrast']}, "
+        f"saturation={settings['saturation']}, sharpness={settings['sharpness']}, "
+        f"filter={settings['filter']}, temp={settings['temperature']}, "
+        f"tint={settings['tint']}, rotation={settings['rotation']}, "
+        f"flip={settings['flip_h']}/{settings['flip_v']}, "
+        f"crop={settings['crop']}, vignette={settings['vignette']}, "
+        f"texts={len(settings['text_overlays'])}, "
+        f"resize={settings['resize_mode']} "
+        f"{settings['width'] or ''}x{settings['height'] or ''})"
+    )
+    return output_path
+
+
+# =========================
 # GET NEXT ID (THREAD SAFE)
 # =========================
 def get_next_id():
@@ -585,8 +1013,8 @@ def process_image(image_path, drive_folder_id=None, source="photobooth"):
         )
 
         print("📥 File masuk ke upload queue")
+        gc.collect()
         return queue_id
-
     except Exception as e:
 
         print("❌ Process gagal")

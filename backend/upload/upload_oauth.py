@@ -1,5 +1,5 @@
 import os
-import pickle
+import tempfile
 import threading
 import time
 import traceback
@@ -13,6 +13,7 @@ from google_auth_httplib2 import AuthorizedHttp
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 
 from runtime_paths import get_backend_dir
 
@@ -30,19 +31,22 @@ BASE_DIR = get_backend_dir(__file__)
 AUTH_DIR = os.path.join(BASE_DIR, "auth")
 
 CLIENT_SECRET_FILE = os.path.join(AUTH_DIR, "client_secrets.json")
-TOKEN_FILE = os.path.join(AUTH_DIR, "token.pickle")
+TOKEN_FILE = os.path.join(AUTH_DIR, "token.json")
+LEGACY_TOKEN_FILE = os.path.join(AUTH_DIR, "token.pickle")
 
 DRIVE_FOLDER_ID = "1Y-A_3AIaLYGn2nrlKiIA9-OEFZPo9neE"
 DRIVE_HTTP_TIMEOUT_SECONDS = 180
 DRIVE_UPLOAD_CHUNK_SIZE = 1 * 1024 * 1024
 DRIVE_SIMPLE_UPLOAD_MAX_SIZE = 50 * 1024 * 1024
-os.makedirs(AUTH_DIR, exist_ok=True)
 
 
 # =========================
 # CACHE SERVICE (IMPORTANT FIX)
 # =========================
 _drive_service = None
+_auth_generation = 0
+_pending_auth_generation = None
+_pending_auth_started = False
 _drive_lock = threading.Lock()
 _upload_lock = threading.Lock()
 
@@ -66,9 +70,93 @@ def credentials_have_required_scopes(creds):
 
 def reset_drive_service():
     global _drive_service
-
     with _drive_lock:
         _drive_service = None
+
+
+def _clear_drive_auth_locked():
+    global _drive_service, _auth_generation
+    global _pending_auth_generation, _pending_auth_started
+    _auth_generation += 1
+    _pending_auth_generation = None
+    _pending_auth_started = False
+    _drive_service = None
+    removed = True
+    for path in (TOKEN_FILE, LEGACY_TOKEN_FILE):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            removed = False
+    return removed
+
+
+def remove_drive_token():
+    with _drive_lock:
+        return _clear_drive_auth_locked()
+
+
+def reserve_drive_login():
+    """Reserve a login before dispatch so logout can cancel an unstarted worker."""
+    global _pending_auth_generation
+    with _drive_lock:
+        if not _clear_drive_auth_locked():
+            raise OSError("Gagal menghapus sesi Google Drive sebelumnya")
+        _pending_auth_generation = _auth_generation
+        return _auth_generation
+
+
+def _check_auth_generation_locked(generation):
+    if generation != _auth_generation:
+        raise DriveUploadError(
+            "Login Google Drive dibatalkan karena sesi telah berubah.",
+            retryable=False,
+        )
+
+
+def _auth_in_progress_error():
+    return DriveUploadError(
+        "Login Google Drive sedang berlangsung. Tunggu sampai selesai.",
+        retryable=True,
+    )
+
+
+def _finish_auth_attempt(generation):
+    global _pending_auth_generation, _pending_auth_started
+    with _drive_lock:
+        if _pending_auth_generation == generation:
+            _pending_auth_generation = None
+            _pending_auth_started = False
+
+
+def _ensure_auth_directory():
+    os.makedirs(AUTH_DIR, mode=0o700, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(AUTH_DIR, 0o700)
+        if os.path.exists(CLIENT_SECRET_FILE):
+            os.chmod(CLIENT_SECRET_FILE, 0o600)
+
+
+def save_credentials(creds):
+    _ensure_auth_directory()
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".token-", suffix=".json", dir=AUTH_DIR
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as token:
+            token.write(creds.to_json())
+        os.replace(temporary_path, TOKEN_FILE)
+    finally:
+        try:
+            os.remove(temporary_path)
+        except FileNotFoundError:
+            pass
+
+    try:
+        os.remove(LEGACY_TOKEN_FILE)
+    except FileNotFoundError:
+        pass
 
 
 def load_saved_credentials():
@@ -76,10 +164,50 @@ def load_saved_credentials():
         return None
 
     try:
-        with open(TOKEN_FILE, "rb") as token:
-            return pickle.load(token)
-    except Exception:
+        _ensure_auth_directory()
+        if os.name != "nt":
+            os.chmod(TOKEN_FILE, 0o600)
+        with open(TOKEN_FILE, "r", encoding="utf-8") as token:
+            payload = json.load(token)
+        if not isinstance(payload, dict):
+            return None
+        return Credentials.from_authorized_user_info(payload)
+    except (OSError, ValueError, TypeError, AttributeError):
         return None
+
+
+def force_drive_login(expected_generation=None):
+    """Jalankan OAuth Google di browser secara paksa dan simpan token baru.
+
+    Reservasi dari pemanggil menjaga agar logout sebelum worker berjalan juga
+    membatalkan login. OAuth tidak memegang lock yang diperlukan oleh logout.
+    """
+    global _drive_service, _pending_auth_generation, _pending_auth_started
+    generation = (
+        reserve_drive_login()
+        if expected_generation is None
+        else expected_generation
+    )
+    with _drive_lock:
+        _check_auth_generation_locked(generation)
+        if _pending_auth_generation != generation:
+            raise DriveUploadError("Reservasi login Google Drive sudah selesai.", retryable=False)
+        if _pending_auth_started:
+            raise _auth_in_progress_error()
+        _pending_auth_started = True
+
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+        creds = flow.run_local_server(port=0, prompt="select_account")
+
+        with _drive_lock:
+            _check_auth_generation_locked(generation)
+            save_credentials(creds)
+            _drive_service = None
+            _pending_auth_generation = None
+            _pending_auth_started = False
+    finally:
+        _finish_auth_attempt(generation)
 
 
 def get_drive_auth_status():
@@ -88,6 +216,7 @@ def get_drive_auth_status():
     return {
         "configured": os.path.exists(CLIENT_SECRET_FILE),
         "token_exists": os.path.exists(TOKEN_FILE),
+        "legacy_token_requires_login": bool(not creds and os.path.exists(LEGACY_TOKEN_FILE)),
         "valid": bool(creds and creds.valid),
         "expired": bool(creds and creds.expired),
         "has_refresh_token": bool(creds and creds.refresh_token),
@@ -98,16 +227,29 @@ def get_drive_auth_status():
 
 def get_drive_user_profile():
     service = get_drive_service()
-    about = service.about().get(
-        fields="user(displayName,emailAddress,photoLink)"
-    ).execute()
-    user = about.get("user") or {}
+    if service is None:
+        return {
+            "email": None,
+            "name": "Operator",
+            "picture": None,
+        }
 
-    return {
-        "email": user.get("emailAddress"),
-        "name": user.get("displayName") or user.get("emailAddress") or "Operator",
-        "picture": user.get("photoLink"),
-    }
+    try:
+        about = service.about().get(
+            fields="user(displayName,emailAddress,photoLink)"
+        ).execute()
+        user = about.get("user") or {}
+        return {
+            "email": user.get("emailAddress"),
+            "name": user.get("displayName") or user.get("emailAddress") or "Operator",
+            "picture": user.get("photoLink"),
+        }
+    except Exception:
+        return {
+            "email": None,
+            "name": "Operator",
+            "picture": None,
+        }
 
 
 def get_http_error_detail(error):
@@ -163,51 +305,51 @@ def is_redirect_missing_location(error):
     )
 
 
-# =========================
-# AUTH FUNCTION
-# =========================
 def get_drive_service():
-
-    global _drive_service
-
+    global _drive_service, _auth_generation
+    global _pending_auth_generation, _pending_auth_started
     with _drive_lock:
         if _drive_service:
             return _drive_service
+        if _pending_auth_generation is not None:
+            raise _auth_in_progress_error()
+        # Each initialization owns its cleanup, even within the same login session.
+        _auth_generation += 1
+        generation = _auth_generation
+        _pending_auth_generation = generation
+        _pending_auth_started = True
 
-        creds = None
-
+    try:
         creds = load_saved_credentials()
-
         if creds and not credentials_have_required_scopes(creds):
             print("🔐 Token Google Drive scope lama terdeteksi, login ulang diperlukan.")
             creds = None
-
-        # refresh or login
-        if not creds or not creds.valid:
-
+        credentials_changed = not creds or not creds.valid
+        if credentials_changed:
             if creds and creds.expired and creds.refresh_token:
                 try:
                     creds.refresh(Request())
                 except RefreshError:
                     print("🔐 Refresh token Google gagal, login ulang diperlukan.")
                     creds = None
-
             if not creds or not creds.valid:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    CLIENT_SECRET_FILE,
-                    SCOPES
-                )
-                creds = flow.run_local_server(port=0)
-
-            # save token
-            with open(TOKEN_FILE, "wb") as token:
-                pickle.dump(creds, token)
+                flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+                creds = flow.run_local_server(port=0, prompt="select_account")
 
         http = httplib2.Http(timeout=DRIVE_HTTP_TIMEOUT_SECONDS)
         authorized_http = AuthorizedHttp(creds, http=http)
-        _drive_service = build("drive", "v3", http=authorized_http)
+        service = build("drive", "v3", http=authorized_http)
 
-        return _drive_service
+        with _drive_lock:
+            _check_auth_generation_locked(generation)
+            if credentials_changed:
+                save_credentials(creds)
+            _drive_service = service
+            _pending_auth_generation = None
+            _pending_auth_started = False
+            return _drive_service
+    finally:
+        _finish_auth_attempt(generation)
 
 
 # =========================
@@ -350,11 +492,7 @@ def upload_to_drive(file_path, drive_folder_id=None):
                     raise DriveUploadError(last_error, retryable=False)
 
                 if status_code == 401:
-                    if os.path.exists(TOKEN_FILE):
-                        try:
-                            os.remove(TOKEN_FILE)
-                        except OSError:
-                            pass
+                    remove_drive_token()
                     print("🔐 Token Google dihapus agar login ulang pada attempt berikutnya.")
 
                 time.sleep(min(30, 2 ** attempt))

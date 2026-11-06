@@ -50,6 +50,9 @@ writeJson(join(seedDir, "database", "auto_watch.json"), {
   known_files: [],
   pending_files: [],
 });
+writeJson(join(seedDir, "database", "camera_provider.json"), {
+  selected: "webcam",
+});
 copyIfExists(join(backendDir, "database", "output_settings.json"), join(seedDir, "database", "output_settings.json"));
 copyIfExists(join(backendDir, "watermark"), join(seedDir, "watermark"));
 

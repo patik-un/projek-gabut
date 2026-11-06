@@ -93,7 +93,7 @@ def start_api_server():
         "127.0.0.1",
         "--port",
         api_port
-    ])
+    ], cwd=os.path.dirname(os.path.abspath(__file__)))
 
     print("✅ API server aktif")
 

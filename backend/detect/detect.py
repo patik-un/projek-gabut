@@ -1,5 +1,8 @@
 from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
+from contextlib import contextmanager
+from functools import wraps
+import errno
 import time
 import os
 import threading
@@ -12,10 +15,75 @@ BASE_DIR = get_backend_dir(__file__)
 
 WATCH_FOLDER = os.path.join(BASE_DIR, "output")
 AUTO_WATCH_CONFIG_FILE = os.path.join(BASE_DIR, "database", "auto_watch.json")
-AUTO_WATCH_LOCK = threading.Lock()
+AUTO_WATCH_LOCK = threading.RLock()
+AUTO_WATCH_LOCK_STATE = threading.local()
+AUTO_COMMIT_LOCK = threading.Lock()
 AUTO_PROCESS_LOCK = threading.Lock()
 AUTO_PROCESSING_FILES = set()
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+
+
+@contextmanager
+def _exclusive_file_lock(lock_path):
+    # Keep the lock file in place so every process locks the same file.
+    os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
+
+    with open(lock_path, "a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(lock_file.fileno()).st_size == 0:
+                lock_file.write(b"0")
+                lock_file.flush()
+            lock_file.seek(0)
+
+            while True:
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as error:
+                    if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise
+                    time.sleep(0.05)
+
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _locked_auto_watch_config():
+    # Nested helpers share one OS lock; the API and detector may be separate processes.
+    with AUTO_WATCH_LOCK:
+        if getattr(AUTO_WATCH_LOCK_STATE, "held", False):
+            yield
+            return
+
+        with _exclusive_file_lock(AUTO_WATCH_CONFIG_FILE + ".lock"):
+            AUTO_WATCH_LOCK_STATE.held = True
+            try:
+                yield
+            finally:
+                AUTO_WATCH_LOCK_STATE.held = False
+
+
+def _with_auto_watch_config_lock(function):
+    @wraps(function)
+    def locked(*args, **kwargs):
+        with _locked_auto_watch_config():
+            return function(*args, **kwargs)
+
+    return locked
 
 
 def normalize_folder_path(folder_path):
@@ -84,6 +152,7 @@ def normalize_pending_files(files):
     return pending
 
 
+@_with_auto_watch_config_lock
 def load_auto_watch_config():
     if not os.path.exists(AUTO_WATCH_CONFIG_FILE):
         return {
@@ -113,6 +182,7 @@ def load_auto_watch_config():
     }
 
 
+@_with_auto_watch_config_lock
 def save_auto_watch_config(
     folder_path,
     drive_folder_id=None,
@@ -132,13 +202,13 @@ def save_auto_watch_config(
         "pending_files": normalize_pending_files(pending_files or [])
     }
 
-    with AUTO_WATCH_LOCK:
-        with open(AUTO_WATCH_CONFIG_FILE, "w") as file:
-            json.dump(config, file, indent=2)
+    with open(AUTO_WATCH_CONFIG_FILE, "w") as file:
+        json.dump(config, file, indent=2)
 
     return config
 
 
+@_with_auto_watch_config_lock
 def set_auto_watch_folder(folder_path, drive_folder_id=None):
     target_folder = normalize_folder_path(folder_path)
 
@@ -157,6 +227,7 @@ def set_auto_watch_folder(folder_path, drive_folder_id=None):
     )
 
 
+@_with_auto_watch_config_lock
 def disable_auto_watch_folder():
     config = load_auto_watch_config()
 
@@ -165,6 +236,20 @@ def disable_auto_watch_folder():
         drive_folder_id=config["drive_folder_id"],
         enabled=False,
         auto_upload_enabled=False,
+        known_files=config["known_files"],
+        pending_files=config["pending_files"]
+    )
+
+
+@_with_auto_watch_config_lock
+def set_auto_watch_drive_folder(drive_folder_id):
+    config = load_auto_watch_config()
+
+    return save_auto_watch_config(
+        config["folder_path"],
+        drive_folder_id=(drive_folder_id or "").strip(),
+        enabled=config["enabled"],
+        auto_upload_enabled=config["auto_upload_enabled"],
         known_files=config["known_files"],
         pending_files=config["pending_files"]
     )
@@ -199,26 +284,34 @@ def register_auto_watch_file(path, wait_ready=False, allow_auto_process=True):
     if wait_ready and not wait_until_file_ready(normalized_path, timeout=8):
         return load_auto_watch_config()
 
-    config = load_auto_watch_config()
+    with _locked_auto_watch_config():
+        config = load_auto_watch_config()
 
-    if not config["enabled"]:
-        return config
+        if not config["enabled"]:
+            return config
 
-    known_files = set(config["known_files"])
-    pending_files = config["pending_files"]
-    pending_paths = {item["path"] for item in pending_files}
+        active_folder = normalize_folder_path(config["folder_path"])
 
-    if normalized_path in known_files or normalized_path in pending_paths:
-        return config
+        if os.path.normcase(os.path.dirname(normalized_path)) != os.path.normcase(active_folder):
+            return config
 
-    info = image_file_info(normalized_path)
+        known_files = set(config["known_files"])
+        pending_files = config["pending_files"]
+        pending_paths = {item["path"] for item in pending_files}
 
-    if not info:
-        return config
+        if normalized_path in known_files or normalized_path in pending_paths:
+            return config
 
-    known_files.add(normalized_path)
+        info = image_file_info(normalized_path)
 
-    if config["auto_upload_enabled"]:
+        if not info:
+            return config
+
+        known_files.add(normalized_path)
+
+        if not config["auto_upload_enabled"]:
+            pending_files.append(info)
+
         saved_config = save_auto_watch_config(
             config["folder_path"],
             drive_folder_id=config["drive_folder_id"],
@@ -228,24 +321,13 @@ def register_auto_watch_file(path, wait_ready=False, allow_auto_process=True):
             pending_files=pending_files
         )
 
-        if allow_auto_process:
-            process_auto_watch_file(
-                normalized_path,
-                drive_folder_id=config["drive_folder_id"] or None
-            )
+    if config["auto_upload_enabled"] and allow_auto_process:
+        process_auto_watch_file(
+            normalized_path,
+            drive_folder_id=config["drive_folder_id"] or None
+        )
 
-        return saved_config
-
-    pending_files.append(info)
-
-    return save_auto_watch_config(
-        config["folder_path"],
-        drive_folder_id=config["drive_folder_id"],
-        enabled=config["enabled"],
-        auto_upload_enabled=config["auto_upload_enabled"],
-        known_files=known_files,
-        pending_files=pending_files
-    )
+    return saved_config
 
 
 def reconcile_auto_watch_folder(allow_auto_process=True):
@@ -282,23 +364,33 @@ def reconcile_auto_watch_folder(allow_auto_process=True):
 
 
 def commit_pending_auto_watch_files(drive_folder_id=None):
-    config = load_auto_watch_config()
-    pending_files = config["pending_files"]
-    queue_ids = []
-    target_drive_folder_id = (
-        drive_folder_id.strip()
-        if drive_folder_id
-        else config["drive_folder_id"]
-    )
+    # Serialize commits without blocking settings updates during image processing.
+    with AUTO_COMMIT_LOCK:
+        with _exclusive_file_lock(AUTO_WATCH_CONFIG_FILE + ".commit.lock"):
+            return _commit_pending_auto_watch_files(drive_folder_id)
 
-    save_auto_watch_config(
-        config["folder_path"],
-        drive_folder_id=target_drive_folder_id,
-        enabled=config["enabled"],
-        auto_upload_enabled=True,
-        known_files=config["known_files"],
-        pending_files=[]
-    )
+
+def _commit_pending_auto_watch_files(drive_folder_id):
+    queue_ids = []
+    processed_paths = set()
+
+    with _locked_auto_watch_config():
+        config = load_auto_watch_config()
+        pending_files = config["pending_files"]
+        target_drive_folder_id = (
+            drive_folder_id.strip()
+            if drive_folder_id
+            else config["drive_folder_id"]
+        )
+
+        save_auto_watch_config(
+            config["folder_path"],
+            drive_folder_id=target_drive_folder_id,
+            enabled=config["enabled"],
+            auto_upload_enabled=True,
+            known_files=config["known_files"],
+            pending_files=pending_files
+        )
 
     for item in pending_files:
         queue_id = process_image(
@@ -309,6 +401,23 @@ def commit_pending_auto_watch_files(drive_folder_id=None):
 
         if queue_id:
             queue_ids.append(queue_id)
+            processed_paths.add(item["path"])
+
+    with _locked_auto_watch_config():
+        current_config = load_auto_watch_config()
+
+        if current_config["folder_path"] == config["folder_path"]:
+            save_auto_watch_config(
+                current_config["folder_path"],
+                drive_folder_id=current_config["drive_folder_id"],
+                enabled=current_config["enabled"],
+                auto_upload_enabled=current_config["auto_upload_enabled"],
+                known_files=set(current_config["known_files"]) | processed_paths,
+                pending_files=[
+                    item for item in current_config["pending_files"]
+                    if item["path"] not in processed_paths
+                ]
+            )
 
     return {
         "files": pending_files,

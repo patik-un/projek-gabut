@@ -1,14 +1,14 @@
 {
   "landscape": {
     "fit": "manual",
-    "position": "bottom-center",
-    "scale": 29,
+    "position": "center",
+    "scale": 92,
     "rotation": 0,
     "opacity": 100,
     "frame_scale": 100,
     "frame_x": 0,
     "frame_y": 0,
-    "photo_scale": 100,
+    "photo_scale": 95,
     "photo_x": 0,
     "photo_y": 0
   },

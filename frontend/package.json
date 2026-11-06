@@ -5,8 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test src/appHandlers.test.js src/backendPolling.test.js src/driveAuth.test.js src/photoboothEditor.test.js src/decorationArtwork.test.js src/studioScene.test.js src/photoStickerTools.test.js src/studioSave.test.js src/photoboothGif.test.js src/gifCatalog.test.js",
     "build": "vite build",
+    "check:release": "node scripts/check-release-version.mjs",
     "prepare:backend": "node scripts/prepare-tauri-backend.mjs",
+    "prepare:camera-bridges": "node scripts/prepare-camera-bridges.mjs",
     "build:backend": "node scripts/build-tauri-backend.mjs",
     "preview": "vite preview",
     "tauri": "tauri"

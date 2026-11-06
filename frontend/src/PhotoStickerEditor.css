@@ -1,0 +1,36 @@
+.photo-sticker-editor { color:#e5edef; background:#191f25; border:1px solid #465158; border-radius:18px; padding:22px; width:min(1100px,94vw); max-height:92vh; overflow:auto; box-shadow:0 24px 90px #0009; }
+.photo-sticker-editor::backdrop { background:#070c12bb; backdrop-filter:blur(4px); }
+.photo-sticker-editor * { box-sizing:border-box; }
+.photo-sticker-editor header,.photo-sticker-editor footer { display:flex;align-items:center;gap:12px;justify-content:space-between; }
+.photo-sticker-editor h2 { margin:0;font-size:22px;color:#eef8f7; }
+.photo-sticker-editor p { color:#aabac1; }
+.photo-sticker-editor header p { margin:7px 0 18px;font-size:13px; }
+.photo-sticker-editor button,.photo-sticker-editor input { font:inherit; }
+.photo-sticker-editor button { padding:9px 12px;background:#2b353d;color:#e8f2f3;border:1px solid #48565f;border-radius:9px;cursor:pointer; }
+.photo-sticker-editor button:hover:enabled { border-color:#58d5be; }
+.photo-sticker-editor button:disabled { opacity:.4;cursor:default; }
+.photo-sticker-editor button[aria-pressed="true"],.photo-sticker-editor .photo-apply { color:#09251f;background:#77dbc5;border-color:#77dbc5; }
+.photo-sticker-editor button:focus-visible,.photo-sticker-editor input:focus-visible { outline:2px solid #77dbc5;outline-offset:3px; }
+.photo-sticker-body { display:grid;grid-template-columns:275px minmax(0,1fr);gap:22px; }
+.photo-sticker-body aside { display:flex;flex-direction:column;gap:12px; }
+.photo-sticker-editor label { display:flex;flex-direction:column;gap:6px;font-size:13px; }
+.photo-sticker-editor input:not([type="range"]) { color:#eaf5f6;background:#111820;border:1px solid #46515c;border-radius:7px;padding:8px;max-width:100%;min-width:0; }
+.photo-sticker-editor input[type="range"] { accent-color:#77dbc5;width:100%; }
+.photo-sticker-editor input[type="file"] { width:100%;font-size:12px; }
+.photo-sticker-editor small { color:#aabac1;font-size:12px;line-height:1.5; }
+.photo-tool-row { display:flex;gap:6px;flex-wrap:wrap; }
+.photo-tool-row button { flex:1;font-size:12px;padding:9px 6px; }
+.photo-sticker-editor fieldset { display:grid;grid-template-columns:1fr 1fr;gap:9px;border:1px solid #46515c;border-radius:9px;padding:10px;min-width:0; }
+.photo-sticker-editor fieldset legend { font-size:12px; }
+.photo-sticker-editor fieldset small { grid-column:1 / -1; }
+.photo-sticker-editor fieldset button { font-size:12px;padding:8px 5px; }
+.photo-sticker-body main { min-width:0; }
+.photo-stage { min-height:350px;display:flex;align-items:center;justify-content:center;padding:16px;border:1px solid #46515c;border-radius:12px;overflow:hidden;background-color:#40484d;background-image:linear-gradient(45deg,#30373c 25%,transparent 25%),linear-gradient(-45deg,#30373c 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#30373c 75%),linear-gradient(-45deg,transparent 75%,#30373c 75%);background-size:24px 24px;background-position:0 0,0 12px,12px -12px,-12px 0; }
+.photo-image-wrap { position:relative;max-width:100%;line-height:0; }
+.photo-image-wrap canvas { display:block;max-width:100%;max-height:54vh;width:auto;height:auto;touch-action:none; }
+.photo-selection { position:absolute;pointer-events:none;border:2px dashed #76f3d5;box-shadow:0 0 0 1px #122c26; }
+.photo-stage-note { line-height:1.5;font-size:12px; }
+.photo-editor-status { min-height:28px;padding:10px 0;color:#ffd49d;font-size:13px; }
+.photo-sticker-editor footer { border-top:1px solid #36434a;padding-top:14px;flex-wrap:wrap; }
+.photo-sticker-editor footer small { margin-right:auto; }
+@media(max-width:720px) { .photo-sticker-editor { padding:15px; } .photo-sticker-body { grid-template-columns:1fr; } .photo-sticker-body main { grid-row:1; } .photo-stage { min-height:200px; } .photo-image-wrap canvas { max-height:35vh; } }

@@ -8,6 +8,8 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -27,17 +29,21 @@ macro_rules! app_err {
     ($($arg:tt)*) => { AppError(format!($($arg)*)) };
 }
 
-struct BackendProcess(Mutex<Option<std::process::Child>>);
+struct BackendProcess {
+    child: Mutex<Option<std::process::Child>>,
+    data_dir: PathBuf,
+    executable_path: PathBuf,
+    backend_dir: PathBuf,
+    sony_bridge: Option<PathBuf>,
+    app_version: String,
+    debug_backend: bool,
+}
 
-fn copy_dir_if_missing(source: &PathBuf, destination: &PathBuf) -> io::Result<()> {
-    if destination.exists() || !source.exists() {
+fn merge_dir_missing(source: &PathBuf, destination: &PathBuf) -> io::Result<()> {
+    if !source.exists() {
         return Ok(());
     }
 
-    copy_dir_recursive(source, destination)
-}
-
-fn copy_dir_recursive(source: &PathBuf, destination: &PathBuf) -> io::Result<()> {
     fs::create_dir_all(destination)?;
 
     for entry in fs::read_dir(source)? {
@@ -46,9 +52,46 @@ fn copy_dir_recursive(source: &PathBuf, destination: &PathBuf) -> io::Result<()>
         let destination_path = destination.join(entry.file_name());
 
         if source_path.is_dir() {
-            copy_dir_recursive(&source_path, &destination_path)?;
-        } else {
+            merge_dir_missing(&source_path, &destination_path)?;
+        } else if !destination_path.exists() {
             fs::copy(&source_path, &destination_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_update_state(data_dir: &PathBuf, version: &str) -> io::Result<()> {
+    let state_path = data_dir.join("database/app_update_state.json");
+    let temporary_path = data_dir.join("database/app_update_state.json.tmp");
+    let contents = serde_json::to_string_pretty(&serde_json::json!({
+        "last_successful_version": version,
+        "data_strategy": "merge-missing-v1"
+    }))
+    .map_err(io::Error::other)?;
+
+    fs::write(&temporary_path, format!("{}\n", contents))?;
+
+    if state_path.exists() {
+        fs::remove_file(&state_path)?;
+    }
+
+    fs::rename(temporary_path, state_path)
+}
+
+fn secure_backend_auth_data(data_dir: &PathBuf) -> io::Result<()> {
+    let auth_dir = data_dir.join("auth");
+    fs::create_dir_all(&auth_dir)?;
+
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&auth_dir, fs::Permissions::from_mode(0o700))?;
+
+        for filename in ["client_secrets.json", "token.json", "token.pickle"] {
+            let path = auth_dir.join(filename);
+            if path.exists() {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            }
         }
     }
 
@@ -68,8 +111,12 @@ fn prepare_backend_data(app: &tauri::App) -> Result<PathBuf, String> {
         .map_err(|error| format!("Gagal membaca resource aplikasi: {}", error))?;
 
     let seed_dir = resource_dir.join("backend-seed");
-    copy_dir_if_missing(&seed_dir, &data_dir)
-        .map_err(|error| format!("Gagal menyiapkan seed data: {}", error))?;
+    merge_dir_missing(&seed_dir, &data_dir).map_err(|error| {
+        format!(
+            "Gagal menggabungkan data update tanpa menimpa data pengguna: {}",
+            error
+        )
+    })?;
 
     // Create necessary subdirs
     for dir in [
@@ -84,6 +131,13 @@ fn prepare_backend_data(app: &tauri::App) -> Result<PathBuf, String> {
         fs::create_dir_all(data_dir.join(dir))
             .map_err(|error| format!("Gagal membuat folder backend {}: {}", dir, error))?;
     }
+
+    write_update_state(&data_dir, &app.package_info().version.to_string())
+        .map_err(|error| format!("Gagal mencatat status update aplikasi: {}", error))?;
+    secure_backend_auth_data(&data_dir)
+        .map_err(|error| format!("Gagal mengamankan data autentikasi: {}", error))?;
+
+    clear_backend_lock(&data_dir);
 
     Ok(data_dir)
 }
@@ -151,12 +205,83 @@ fn stop_backend(child: &mut std::process::Child) {
 }
 
 fn stop_managed_backend(state: tauri::State<BackendProcess>) {
-    if let Ok(mut backend) = state.0.lock() {
+    if let Ok(mut backend) = state.child.lock() {
         if let Some(mut child) = backend.take() {
             stop_backend(&mut child);
             println!("✅ Backend Killed");
         }
     }
+
+    let lock_path = state.data_dir.join("database/backend.lock");
+    let _ = fs::remove_file(&lock_path);
+}
+
+fn clear_backend_lock(data_dir: &PathBuf) {
+    // Hapus backend.lock dari run sebelumnya (mencegah false positive PID recycle)
+    let lock_path = data_dir.join("database/backend.lock");
+    let _ = fs::remove_file(&lock_path);
+}
+
+fn spawn_backend(state: &BackendProcess) -> Result<std::process::Child, String> {
+    let mut command = StdCommand::new(&state.executable_path);
+    if state.debug_backend {
+        command.arg("main.py");
+    }
+
+    command
+        .current_dir(&state.backend_dir)
+        .env("EVENT_BOOTH_BACKEND_DATA_DIR", &state.data_dir)
+        .env("EVENT_BOOTH_APP_VERSION", &state.app_version)
+        .env("PHOTOBOOTH_CAMERA_INDEX", "auto");
+
+    if let Some(sony_bridge) = &state.sony_bridge {
+        if sony_bridge.exists() {
+            command.env("EVENT_BOOTH_SONY_CRSDK_BRIDGE", sony_bridge);
+        }
+    }
+
+    #[cfg(unix)]
+    command.process_group(0);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    command
+        .spawn()
+        .map_err(|error| format!("Gagal menjalankan backend: {}", error))
+}
+
+#[tauri::command]
+fn start_backend(state: tauri::State<BackendProcess>) -> Result<(), String> {
+    let mut backend = state
+        .child
+        .lock()
+        .map_err(|_| "Gagal mengunci state backend".to_string())?;
+
+    if let Some(child) = backend.as_mut() {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                *backend = None;
+            }
+            Ok(None) => {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(format!("Gagal memeriksa proses backend: {}", error));
+            }
+        }
+    }
+
+    clear_backend_lock(&state.data_dir);
+    let child = spawn_backend(&state)?;
+    *backend = Some(child);
+
+    println!("✅ Backend Started");
+    Ok(())
 }
 
 #[tauri::command]
@@ -264,33 +389,28 @@ pub fn run() {
                 (backend_binary, backend_dir, data_dir)
             };
 
-            let mut command = StdCommand::new(&python_path);
-            if cfg!(debug_assertions) {
-                command.arg("main.py");
-            }
+            let sony_bridge = if cfg!(debug_assertions) {
+                backend_dir.join("camera/native/sony/build/event-booth-sony-crsdk-bridge")
+            } else {
+                app.path()
+                    .resource_dir()
+                    .map_err(|error| app_err!("Resource path: {}", error))?
+                    .join("camera-bridges/sony/event-booth-sony-crsdk-bridge")
+            };
 
-            command
-                .current_dir(&backend_dir)
-                .env("EVENT_BOOTH_BACKEND_DATA_DIR", &data_dir)
-                .env("PHOTOBOOTH_CAMERA_INDEX", "auto");
+            clear_backend_lock(&data_dir);
 
-            #[cfg(unix)]
-            command.process_group(0);
+            app.manage(BackendProcess {
+                child: Mutex::new(None),
+                data_dir: data_dir.clone(),
+                executable_path: python_path,
+                backend_dir,
+                sony_bridge: Some(sony_bridge),
+                app_version: app.package_info().version.to_string(),
+                debug_backend: cfg!(debug_assertions),
+            });
 
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-                command.creation_flags(CREATE_NEW_PROCESS_GROUP);
-            }
-
-            let child = command
-                .spawn()
-                .map_err(|e| app_err!("Gagal menjalankan backend: {}", e))?;
-
-            app.manage(BackendProcess(Mutex::new(Some(child))));
-
-            println!("✅ Backend Started");
+            println!("Backend ready to start after login");
 
             Ok(())
         })
@@ -305,7 +425,7 @@ pub fn run() {
 
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![pick_folder_path])
+        .invoke_handler(tauri::generate_handler![pick_folder_path, start_backend])
         .build(tauri::generate_context!())
         .expect("❌ Error while building tauri application")
         .run(|app, event| match event {
@@ -319,4 +439,70 @@ pub fn run() {
 
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_dir_missing, secure_backend_auth_data};
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn update_seed_adds_missing_files_without_overwriting_user_data() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("event-booth-update-test-{}", unique));
+        let seed = root.join("seed");
+        let data = root.join("data");
+
+        fs::create_dir_all(seed.join("database")).unwrap();
+        fs::create_dir_all(data.join("database")).unwrap();
+        fs::write(seed.join("database/settings.json"), "new default").unwrap();
+        fs::write(seed.join("database/new-feature.json"), "new feature").unwrap();
+        fs::write(data.join("database/settings.json"), "user value").unwrap();
+
+        merge_dir_missing(&seed, &data).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(data.join("database/settings.json")).unwrap(),
+            "user value"
+        );
+        assert_eq!(
+            fs::read_to_string(data.join("database/new-feature.json")).unwrap(),
+            "new feature"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_data_permissions_are_restricted() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("event-booth-auth-test-{}", unique));
+        let auth_dir = root.join("auth");
+        let token_path = auth_dir.join("token.json");
+        fs::create_dir_all(&auth_dir).unwrap();
+        fs::write(&token_path, "{}").unwrap();
+
+        secure_backend_auth_data(&root).unwrap();
+
+        assert_eq!(
+            fs::metadata(&auth_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&token_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }

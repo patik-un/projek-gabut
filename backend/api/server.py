@@ -13,6 +13,11 @@ import shutil
 import subprocess
 import sys
 import platform
+import math
+from api.editor_catalog import normalize_editor_catalog
+from api.sticker_processing import MAX_REQUEST_BYTES, SegmentationError, remove_background
+from api.gif_rendering import MAX_GIF_REQUEST_BYTES, MAX_UPLOAD_REQUEST_BYTES, render_gif, validate_gif_files
+from starlette.concurrency import run_in_threadpool
 
 from fastapi import FastAPI, Request
 from google.oauth2 import id_token
@@ -21,6 +26,7 @@ from google.auth.transport import requests as google_requests
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
+    HTMLResponse,
     JSONResponse,
     StreamingResponse
 )
@@ -34,6 +40,7 @@ from process.process import (
     get_next_id,
     load_output_settings,
     normalize_watermark_profiles,
+    process_edit_image,
     write_output_settings,
 )
 from queue_db import (
@@ -46,16 +53,20 @@ from queue_db import (
 from upload.upload_oauth import (
     DriveUploadError,
     create_drive_folder,
+    force_drive_login,
     get_drive_auth_status,
     get_drive_service,
     get_drive_user_profile,
     share_drive_file,
+    remove_drive_token,
+    reserve_drive_login,
 )
 from detect.detect import (
     commit_pending_auto_watch_files,
     disable_auto_watch_folder,
     get_auto_watch_status,
     register_auto_watch_file,
+    set_auto_watch_drive_folder,
     set_auto_watch_folder,
 )
 from runtime_paths import get_backend_dir
@@ -65,12 +76,32 @@ from runtime_paths import get_backend_dir
 # =========================
 app = FastAPI()
 
+LOCAL_APP_ORIGINS = [
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=LOCAL_APP_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def enforce_local_app_origin(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in LOCAL_APP_ORIGINS:
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "message": "Origin tidak diizinkan"},
+        )
+    return await call_next(request)
+
 
 DEFAULT_CAMERA_INDEX = "auto"
 latest_frame = None
@@ -214,13 +245,16 @@ PHOTOBOOTH_TEMPLATE_FILE = os.path.join(
     WATERMARK_DIR,
     "photobooth_template.png"
 )
-PHOTOBOOTH_TEMPLATE_MAX_SLOTS = 3
+PHOTOBOOTH_TEMPLATE_MAX_SLOTS = 10
+PHOTOBOOTH_SETTINGS_FILE = os.path.join(WATERMARK_DIR, "photobooth_settings.json")
+PHOTOBOOTH_EDITOR_SETTINGS_FILE = os.path.join(WATERMARK_DIR, "photobooth_editor_settings.json")
+PHOTOBOOTH_SETTINGS_LOCK = threading.RLock()
 PHOTOBOOTH_TEMPLATE_FILES = {
     slot_count: os.path.join(
         WATERMARK_DIR,
         f"photobooth_template_{slot_count}.png"
     )
-    for slot_count in range(1, PHOTOBOOTH_TEMPLATE_MAX_SLOTS + 1)
+    for slot_count in range(1, 4)
 }
 
 PHOTOBOOTH_STRIP_DIR = os.path.join(
@@ -243,8 +277,8 @@ init_db()
 
 def public_url(path):
     filename = os.path.basename(path)
-    api_port = os.environ.get("EVENT_BOOTH_BACKEND_PORT", "8000")
-    base_url = f"http://127.0.0.1:{api_port}"
+    port = int(os.environ.get("EVENT_BOOTH_BACKEND_PORT", "8000"))
+    base_url = f"http://127.0.0.1:{port}"
 
     if path.startswith(WATERMARK_DIR):
         return f"{base_url}/watermark-files/{filename}"
@@ -469,9 +503,41 @@ app.mount(
     name="photobooth-strips"
 )
 
-# =========================
-# ROOT
-# =========================
+import threading
+
+# ... existing imports ...
+
+@app.post("/auth/drive/login-trigger")
+def trigger_drive_login():
+    if not get_drive_auth_status().get("configured"):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "Konfigurasi Google Drive belum tersedia. Siapkan client_secrets.json sebelum login.",
+            },
+        )
+
+    try:
+        reserved_generation = reserve_drive_login()
+    except OSError as error:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Gagal menyiapkan login Google Drive: {error}"},
+        )
+
+    def run_login():
+        try:
+            # Paksa login browser yang baru, bukan memakai akun/token lama.
+            force_drive_login(expected_generation=reserved_generation)
+        except Exception as e:
+            print(f"Error during background login: {e}")
+
+    thread = threading.Thread(target=run_login, daemon=True)
+    thread.start()
+
+    return {"success": True, "message": "Proses login telah dimulai. Silakan cek browser Anda."}
+
 @app.get("/")
 def root():
 
@@ -568,9 +634,21 @@ def auth_drive_status():
 def auth_drive_connect():
     try:
         user = get_drive_user_profile()
+        status = get_drive_auth_status()
+
+        if not status["token_exists"] or not status["valid"]:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "success": False,
+                    "message": "Login diperlukan",
+                    "drive": status
+                }
+            )
+
         return {
             "success": True,
-            "drive": get_drive_auth_status(),
+            "drive": status,
             "user": user
         }
     except Exception as error:
@@ -582,6 +660,16 @@ def auth_drive_connect():
                 "drive": get_drive_auth_status()
             }
         )
+
+
+@app.post("/auth/drive/logout")
+def auth_drive_logout():
+    if remove_drive_token():
+        return {"success": True, "message": "Sesi Drive berhasil dihapus"}
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "message": "Gagal menghapus sesi Drive"}
+    )
 
 # =========================
 # GET QUEUE
@@ -710,16 +798,7 @@ async def start_photobooth_session(request: Request):
         payload = json.loads(raw_body) if raw_body else {}
     except (json.JSONDecodeError, UnicodeDecodeError):
         payload = {}
-    drive_folder_id = (payload.get("drive_folder_id") or "").strip()
-
-    if not drive_folder_id:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "success": False,
-                "message": "Drive Awal Photobooth wajib diisi di admin panel"
-            }
-        )
+    drive_folder_id = (payload.get("drive_folder_id") or "").strip() or "LOCAL_SESSION"
 
     deleted = clear_capture_files()
 
@@ -896,10 +975,10 @@ def detect_template_slot_rects(image_path):
 
         return [
             {
-                "left": (left / w) * 100,
-                "top": (top / h) * 100,
-                "width": (cw / w) * 100,
-                "height": (ch / h) * 100,
+                "left": float(left / w) * 100,
+                "top": float(top / h) * 100,
+                "width": float(cw / w) * 100,
+                "height": float(ch / h) * 100,
             }
             for left, top, cw, ch in raw_slots
         ]
@@ -1024,10 +1103,10 @@ def detect_template_slots(image_path):
 
 def photobooth_template_payload(slot_count):
     template_path = PHOTOBOOTH_TEMPLATE_FILES[slot_count]
-    active = os.path.exists(template_path)
+    has_image = os.path.exists(template_path)
     detected = (
         detect_template_slot_rects(template_path)
-        if active
+        if has_image
         else {
             "count": slot_count,
             "slots": [],
@@ -1037,42 +1116,253 @@ def photobooth_template_payload(slot_count):
     )
 
     return {
-        "active": active,
+        "id": f"photobooth-strip-{slot_count}",
+        "name": f"Strip {slot_count} Pose",
+        "active": True,
         "slot_count": slot_count,
+        "pose_count": slot_count,
         "detected_slot_count": detected["count"],
         "slots": detected["slots"],
         "width": detected["width"],
         "height": detected["height"],
         "image_url": (
             f"{public_url(template_path)}?v={int(os.path.getmtime(template_path))}"
-            if active
+            if has_image
             else None
         )
     }
 
 
+def normalize_photobooth_settings(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Pengaturan strip harus berupa objek")
+    options = payload.get("strip_options")
+    if not isinstance(options, list) or not options:
+        raise ValueError("Minimal satu strip harus tersedia")
+    strips, identifiers = [], set()
+    for strip in options:
+        if not isinstance(strip, dict):
+            raise ValueError("Data strip tidak valid")
+        strip_id, name = strip.get("id"), strip.get("name")
+        if not isinstance(strip_id, str) or not strip_id.strip() or strip_id in identifiers:
+            raise ValueError("ID strip harus unik dan tidak kosong")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Nama strip wajib diisi")
+        for key in ("pose_count", "slot_count"):
+            count = strip.get(key, strip.get("pose_count"))
+            if type(count) is not int or not 1 <= count <= PHOTOBOOTH_TEMPLATE_MAX_SLOTS:
+                raise ValueError("Jumlah pose dan slot harus antara 1 sampai 10")
+        slots = strip.get("slots", [])
+        if not isinstance(slots, list) or len(slots) > PHOTOBOOTH_TEMPLATE_MAX_SLOTS:
+            raise ValueError("Slot strip tidak valid")
+        for slot in slots:
+            if not isinstance(slot, dict):
+                raise ValueError("Posisi slot tidak valid")
+            for key in ("left", "top", "width", "height"):
+                value = slot.get(key)
+                if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 100:
+                    raise ValueError("Posisi slot harus antara 0 sampai 100")
+        if type(strip.get("active", True)) is not bool:
+            raise ValueError("Status aktif strip tidak valid")
+        image_url = strip.get("image_url")
+        if image_url is not None and not isinstance(image_url, str):
+            raise ValueError("Gambar strip tidak valid")
+        normalized = {
+            "id": strip_id, "name": name.strip(), "image_url": image_url,
+            "slot_count": strip.get("slot_count", strip["pose_count"]),
+            "pose_count": strip["pose_count"], "slots": slots,
+            "active": strip.get("active", True),
+        }
+        for key in ("width", "height"):
+            value = strip.get(key)
+            if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value <= 0):
+                raise ValueError("Ukuran gambar strip tidak valid")
+            normalized[key] = value
+        identifiers.add(strip_id)
+        strips.append(normalized)
+    preferences = payload.get("strip_settings", {})
+    if not isinstance(preferences, dict):
+        raise ValueError("Pengaturan cetak strip tidak valid")
+    strip_settings = {}
+    for strip in strips:
+        setting = preferences.get(strip["id"], {})
+        if not isinstance(setting, dict) or setting.get("paper_size", "4r") not in ("3r", "4r"):
+            raise ValueError("Ukuran kertas harus 3R atau 4R")
+        if type(setting.get("double_strip_enabled", False)) is not bool:
+            raise ValueError("Pengaturan dua strip tidak valid")
+        strip_settings[strip["id"]] = {
+            "paper_size": setting.get("paper_size", "4r"),
+            "double_strip_enabled": setting.get("double_strip_enabled", False),
+        }
+    active_ids = [strip["id"] for strip in strips if strip["active"]]
+    default_id = payload.get("default_strip_id")
+    return {
+        "strip_options": strips,
+        "default_strip_id": default_id if default_id in active_ids else next(iter(active_ids), None),
+        "strip_settings": strip_settings,
+    }
+
+
+def load_photobooth_settings():
+    with PHOTOBOOTH_SETTINGS_LOCK:
+        try:
+            with open(PHOTOBOOTH_SETTINGS_FILE, encoding="utf-8") as file:
+                return normalize_photobooth_settings(json.load(file))
+        except (FileNotFoundError, ValueError, TypeError):
+            return normalize_photobooth_settings({
+                "strip_options": [photobooth_template_payload(count) for count in PHOTOBOOTH_TEMPLATE_FILES],
+            })
+
+
+def write_photobooth_settings(payload):
+    settings = normalize_photobooth_settings(payload)
+    with PHOTOBOOTH_SETTINGS_LOCK:
+        for strip in settings["strip_options"]:
+            if (strip["image_url"] or "").startswith("data:image/png;base64,"):
+                image_data = store_photobooth_png(strip["image_url"])
+                # Empty slots mean pending detection. A later pose edit supplies
+                # an explicit layout that must survive offline synchronization.
+                if strip["slots"]:
+                    image_data = {key: image_data[key] for key in ("image_url", "width", "height")}
+                strip.update(image_data)
+        temp_path = f"{PHOTOBOOTH_SETTINGS_FILE}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as file:
+                json.dump(settings, file, ensure_ascii=False, allow_nan=False)
+            os.replace(temp_path, PHOTOBOOTH_SETTINGS_FILE)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    return settings
+
+
+def store_photobooth_png(data_base64):
+    image_bytes = decode_base64_image(data_base64)
+    if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Template strip harus berupa PNG yang valid")
+    temp_path = os.path.join(WATERMARK_DIR, f"photobooth_template_upload_{uuid.uuid4().hex}.png")
+    try:
+        with open(temp_path, "wb") as file:
+            file.write(image_bytes)
+        detected = detect_template_slot_rects(temp_path)
+        if not 1 <= detected["count"] <= PHOTOBOOTH_TEMPLATE_MAX_SLOTS or not detected["width"] or not detected["height"]:
+            raise ValueError("PNG harus memiliki 1 sampai 10 slot foto")
+        target = os.path.join(WATERMARK_DIR, f"photobooth_custom_{uuid.uuid4().hex}.png")
+        os.replace(temp_path, target)
+        return {"image_url": f"{public_url(target)}?v={time.time_ns()}",
+                "pose_count": detected["count"], "slot_count": detected["count"],
+                "slots": detected["slots"], "width": detected["width"], "height": detected["height"]}
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def photobooth_settings_response(settings=None):
+    settings = settings if settings is not None else load_photobooth_settings()
+    active = next((strip for strip in settings["strip_options"]
+                   if strip["id"] == settings["default_strip_id"]), settings["strip_options"][0])
+    return {"success": True, "configured": os.path.exists(PHOTOBOOTH_SETTINGS_FILE), **settings, "active": active["active"],
+            "slot_count": active["slot_count"], "image_url": active["image_url"],
+            "templates": {str(strip["pose_count"]): strip for strip in settings["strip_options"]}}
+
+
+async def read_bounded_json(request, maximum):
+    content_length = request.headers.get("content-length")
+    if content_length is not None and (int(content_length) < 0 or int(content_length) > maximum):
+        raise ValueError("Data permintaan terlalu besar")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > maximum:
+            raise ValueError("Data permintaan terlalu besar")
+        body.extend(chunk)
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError, RecursionError) as error:
+        raise ValueError("Data JSON tidak valid") from error
+    if not isinstance(payload, dict):
+        raise ValueError("Permintaan harus berupa objek JSON")
+    return payload
+
+
+@app.post("/photobooth/gif")
+async def create_photobooth_gif(request: Request):
+    try:
+        payload = await read_bounded_json(request, MAX_GIF_REQUEST_BYTES)
+        return await run_in_threadpool(render_gif, payload)
+    except ValueError as error:
+        return JSONResponse(status_code=400, content={"success": False, "message": str(error)})
+
+
+@app.post("/photobooth/sticker/remove-background")
+async def remove_sticker_background(request: Request):
+    try:
+        # Stream into a bounded buffer, including requests without Content-Length.
+        content_length = request.headers.get("content-length")
+        if content_length is not None and (int(content_length) < 0 or int(content_length) > MAX_REQUEST_BYTES):
+            raise ValueError("Data permintaan terlalu besar; gambar maksimal 4 MB")
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_REQUEST_BYTES:
+                raise ValueError("Data permintaan terlalu besar; gambar maksimal 4 MB")
+            body.extend(chunk)
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise ValueError("Permintaan harus berupa objek JSON dengan image_data")
+        if "rect" in payload and payload["rect"] is None:
+            raise ValueError("rect harus berisi x, y, width, height antara 0 dan 1")
+        return await run_in_threadpool(remove_background, payload.get("image_data"), payload.get("rect"))
+    except (ValueError, UnicodeDecodeError) as error:
+        return JSONResponse(status_code=400, content={"success": False, "message": str(error)})
+    except SegmentationError as error:
+        return JSONResponse(status_code=422, content={"success": False, "message": str(error), "recoverable": True})
+
+
+@app.get("/photobooth/editor-settings")
+def get_photobooth_editor_settings():
+    with PHOTOBOOTH_SETTINGS_LOCK:
+        try:
+            with open(PHOTOBOOTH_EDITOR_SETTINGS_FILE, encoding="utf-8") as file:
+                settings = normalize_editor_catalog(json.load(file))
+        except FileNotFoundError:
+            settings = None
+        except (ValueError, TypeError, OSError):
+            return JSONResponse(status_code=500, content={"success": False, "message": "Gagal membaca katalog edit"})
+    return {"success": True, "schema_version": 2, "settings": settings}
+
+
+@app.post("/photobooth/editor-settings")
+async def save_photobooth_editor_settings(request: Request):
+    try:
+        settings = normalize_editor_catalog(await request.json())
+    except (ValueError, TypeError) as error:
+        return JSONResponse(status_code=400, content={"success": False, "message": str(error)})
+    temp_path = f"{PHOTOBOOTH_EDITOR_SETTINGS_FILE}.{uuid.uuid4().hex}.tmp"
+    try:
+        with PHOTOBOOTH_SETTINGS_LOCK:
+            os.makedirs(os.path.dirname(PHOTOBOOTH_EDITOR_SETTINGS_FILE), exist_ok=True)
+            with open(temp_path, "w", encoding="utf-8") as file:
+                json.dump(settings, file, ensure_ascii=False)
+            os.replace(temp_path, PHOTOBOOTH_EDITOR_SETTINGS_FILE)
+    except OSError:
+        return JSONResponse(status_code=500, content={"success": False, "message": "Gagal menyimpan katalog edit"})
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    return {"success": True, "schema_version": 2, "settings": settings}
+
+
+@app.get("/photobooth/settings")
 @app.get("/photobooth/template")
 def get_photobooth_template():
-    templates = {
-        str(slot_count): photobooth_template_payload(slot_count)
-        for slot_count in PHOTOBOOTH_TEMPLATE_FILES
-    }
-    active_template = next(
-        (
-            template
-            for template in templates.values()
-            if template["active"]
-        ),
-        photobooth_template_payload(1)
-    )
+    return photobooth_settings_response()
 
-    return {
-        "success": True,
-        "active": active_template["active"],
-        "slot_count": active_template["slot_count"],
-        "image_url": active_template["image_url"],
-        "templates": templates
-    }
+
+@app.post("/photobooth/settings")
+async def save_photobooth_settings(request: Request):
+    try:
+        return photobooth_settings_response(write_photobooth_settings(await request.json()))
+    except (ValueError, TypeError) as error:
+        return JSONResponse(status_code=400, content={"success": False, "message": str(error)})
 
 
 @app.post("/photobooth/template")
@@ -1088,39 +1378,38 @@ async def upload_photobooth_template(request: Request):
             }
         )
 
-    upload_id = uuid.uuid4().hex
-    temp_template_file = os.path.join(
-        WATERMARK_DIR,
-        f"photobooth_template_upload_{upload_id}.png"
-    )
-
+    if not isinstance(payload, dict):
+        return JSONResponse(status_code=400, content={"success": False, "message": "Data template tidak valid"})
+    settings = load_photobooth_settings()
+    strip_id = payload.get("strip_id")
+    if strip_id is not None and not any(strip["id"] == strip_id for strip in settings["strip_options"]):
+        return JSONResponse(status_code=404, content={"success": False, "message": "Strip tidak ditemukan"})
     try:
-        save_base64_file(payload.get("data_base64"), temp_template_file)
-    except ValueError as error:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "success": False,
-                "message": str(error)
-            }
-        )
+        image_data = store_photobooth_png(payload.get("data_base64"))
+    except (ValueError, TypeError) as error:
+        return JSONResponse(status_code=400, content={"success": False, "message": str(error)})
+    slot_count = image_data["slot_count"]
+    strip_id = strip_id or f"photobooth-strip-{slot_count}"
+    with PHOTOBOOTH_SETTINGS_LOCK:
+        settings = load_photobooth_settings()
+        existing = next((strip for strip in settings["strip_options"] if strip["id"] == strip_id), None)
+        uploaded = {**(existing or {"id": strip_id, "name": f"Strip {slot_count} Pose", "active": True}), **image_data}
+        settings["strip_options"] = [uploaded if strip["id"] == strip_id else strip for strip in settings["strip_options"]]
+        if existing is None:
+            settings["strip_options"].append(uploaded)
+        saved = write_photobooth_settings(settings)
+    return {**photobooth_settings_response(saved), "slot_count": slot_count, "image_url": image_data["image_url"]}
 
-    detected = detect_template_slot_rects(temp_template_file)
-    slot_count = detected["count"]
-    target_template_file = PHOTOBOOTH_TEMPLATE_FILES[slot_count]
-    shutil.move(temp_template_file, target_template_file)
-    templates = {
-        str(count): photobooth_template_payload(count)
-        for count in PHOTOBOOTH_TEMPLATE_FILES
-    }
 
-    return {
-        "success": True,
-        "active": True,
-        "slot_count": slot_count,
-        "image_url": f"{public_url(target_template_file)}?v={int(os.path.getmtime(target_template_file))}",
-        "templates": templates
-    }
+@app.delete("/photobooth/template/by-id/{strip_id}")
+def reset_photobooth_template_by_id(strip_id: str):
+    with PHOTOBOOTH_SETTINGS_LOCK:
+        settings = load_photobooth_settings()
+        strip = next((strip for strip in settings["strip_options"] if strip["id"] == strip_id), None)
+        if strip is None:
+            return JSONResponse(status_code=404, content={"success": False, "message": "Strip tidak ditemukan"})
+        strip.update(image_url=None, slots=[], width=None, height=None)
+        return photobooth_settings_response(write_photobooth_settings(settings))
 
 
 @app.delete("/photobooth/template/{slot_count}")
@@ -1134,26 +1423,16 @@ def delete_photobooth_template(slot_count: int):
             }
         )
 
-    template_path = PHOTOBOOTH_TEMPLATE_FILES[slot_count]
-
-    if os.path.exists(template_path):
-        os.remove(template_path)
-
-    templates = {
-        str(count): photobooth_template_payload(count)
-        for count in PHOTOBOOTH_TEMPLATE_FILES
-    }
-
-    return {
-        "success": True,
-        "slot_count": slot_count,
-        "templates": templates
-    }
+    return reset_photobooth_template_by_id(f"photobooth-strip-{slot_count}")
 
 
 @app.post("/photobooth/drive-upload")
 async def upload_photobooth_drive(request: Request):
-    payload = await request.json()
+    try:
+        payload = await read_bounded_json(request, MAX_UPLOAD_REQUEST_BYTES)
+        gif_files = await run_in_threadpool(validate_gif_files, payload.get("gif_files"))
+    except ValueError as error:
+        return JSONResponse(status_code=400, content={"success": False, "message": str(error)})
     email = (payload.get("email") or "").strip()
     filename = payload.get("filename") or "photobooth-strip.jpg"
     parent_drive_folder_id = (payload.get("parent_drive_folder_id") or "").strip() or None
@@ -1209,8 +1488,17 @@ async def upload_photobooth_drive(request: Request):
         source="photobooth"
     )
 
+    gif_queue_ids = []
+    for index, (gif_filename, gif_bytes) in enumerate(gif_files):
+        attachment_name = f"{safe_filename(folder_name)}_{uuid.uuid4().hex[:12]}_{index}_{gif_filename}"
+        attachment_path = os.path.join(PHOTOBOOTH_STRIP_DIR, attachment_name)
+        with open(attachment_path, "wb") as attachment:
+            attachment.write(gif_bytes)
+        gif_queue_ids.append(add_to_queue(attachment_path, drive_folder_id=folder["id"], source="photobooth"))
+
     return {
         "success": True,
+        "gif_queue_ids": gif_queue_ids,
         "folder_name": folder_name,
         "folder_id": folder["id"],
         "folder_url": folder.get("webViewLink"),
@@ -1539,6 +1827,27 @@ def disable_auto_watch_folder_endpoint():
     }
 
 
+@app.patch("/auto-watch-folder")
+async def update_auto_watch_drive_folder_endpoint(request: Request):
+    try:
+        payload = await request.json()
+    except ValueError:
+        payload = None
+
+    if (
+        not isinstance(payload, dict)
+        or "drive_folder_id" not in payload
+        or not isinstance(payload["drive_folder_id"], (str, type(None)))
+    ):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "Google Drive Folder ID tidak valid"},
+        )
+
+    set_auto_watch_drive_folder(payload["drive_folder_id"])
+    return {"success": True, "watch": get_auto_watch_status()}
+
+
 @app.get("/auto-watch-folder/file")
 def get_auto_watch_file(request: Request):
     path = request.query_params.get("path") or ""
@@ -1606,8 +1915,46 @@ async def manual_upload_endpoint(request: Request):
     with open(upload_path, "wb") as file:
         file.write(body)
 
+    edit_params = {
+        "brightness": request.query_params.get("brightness"),
+        "contrast": request.query_params.get("contrast"),
+        "saturation": request.query_params.get("saturation"),
+        "sharpness": request.query_params.get("sharpness"),
+        "filter": request.query_params.get("filter"),
+        "resize_mode": request.query_params.get("resize_mode"),
+        "width": request.query_params.get("width"),
+        "height": request.query_params.get("height"),
+        "rotation": request.query_params.get("rotation"),
+        "flip_h": request.query_params.get("flip_h"),
+        "flip_v": request.query_params.get("flip_v"),
+        "crop": request.query_params.get("crop"),
+        "temperature": request.query_params.get("temperature"),
+        "tint": request.query_params.get("tint"),
+        "vignette": request.query_params.get("vignette"),
+        "text_overlays": request.query_params.get("text_overlays"),
+    }
+
+    has_edit = any(
+        value not in (None, "", "null")
+        for value in edit_params.values()
+    )
+
+    queued_path = upload_path
+
+    if has_edit:
+        try:
+            queued_path = process_edit_image(
+                upload_path,
+                output_dir=batch_dir,
+                edit_settings=edit_params
+            )
+            if queued_path != upload_path:
+                os.remove(upload_path)
+        except Exception as error:
+            print(f"❌ Edit processing gagal, file raw diupload: {error}")
+
     queue_id = add_to_queue(
-        upload_path,
+        queued_path,
         drive_folder_id=drive_folder_id,
         source="auto_upload",
         status="staged",
@@ -1618,7 +1965,8 @@ async def manual_upload_endpoint(request: Request):
         "success": True,
         "queue_id": queue_id,
         "batch_id": batch_id,
-        "file_path": upload_path
+        "file_path": queued_path,
+        "edited": has_edit
     }
 
 
@@ -1778,7 +2126,7 @@ def generate_camera_frames():
                 b"\r\n"
             )
 
-            time.sleep(0.03)
+            time.sleep(0.06)
 
     finally:
         cap.release()
@@ -1804,7 +2152,7 @@ async def capture_photo(request: Request):
     except (TypeError, ValueError):
         max_captures = 6
 
-    max_captures = min(6, max(1, max_captures))
+    max_captures = min(PHOTOBOOTH_TEMPLATE_MAX_SLOTS * 2, max(1, max_captures))
 
     if len(current_captures) >= max_captures:
         return JSONResponse(
