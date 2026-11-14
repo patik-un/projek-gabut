@@ -8,8 +8,8 @@ Standard input/output/error diarahkan ke perangkat null agar proses Python
 memiliki handle yang valid tanpa konsol. Backend tetap dikelola aplikasi dan
 berhenti melalui mekanisme shutdown yang sudah ada.
 
-Tes native Windows menjalankan subprocess probe GetConsoleWindow: cara peluncuran
-lama harus terdeteksi memiliki konsol, sedangkan konfigurasi produksi harus tidak
+Tes native Windows menjalankan subprocess probe GetConsoleWindow: proses kontrol
+dengan CREATE_NEW_CONSOLE harus terdeteksi memiliki konsol, sedangkan konfigurasi produksi harus tidak
 memiliki konsol. Workflow menjalankan cargo test --release --locked sesudah build
 installer dan sebelum smoke test backend hasil paket.
 

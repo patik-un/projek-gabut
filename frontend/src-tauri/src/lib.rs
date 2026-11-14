@@ -496,9 +496,11 @@ mod tests {
             command
         };
 
-        // Prove the probe catches the old behavior before checking the real policy.
-        let old_behavior = make_probe().creation_flags(0x00000200).output().unwrap();
-        assert!(!old_behavior.status.success(), "Console probe did not catch the old launch behavior");
+        // CI may have no inherited console. Explicitly create one to verify the
+        // probe detects a console, then check the real background-launch policy.
+        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+        let visible_console = make_probe().creation_flags(CREATE_NEW_CONSOLE).output().unwrap();
+        assert!(!visible_console.status.success(), "Console probe did not detect an explicitly created console");
         let mut hidden_backend = make_probe();
         super::configure_backend_process(&mut hidden_backend);
         let result = hidden_backend.output().unwrap();
