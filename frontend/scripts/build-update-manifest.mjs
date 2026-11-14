@@ -12,4 +12,3 @@ export function buildUpdateManifest({ version, tag, installerPath, signaturePath
     signature, url: `https://github.com/${repository}/releases/download/${tag}/${encodeURIComponent(name)}`,
   } } };
 }
-
