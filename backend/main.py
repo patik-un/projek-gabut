@@ -106,6 +106,8 @@ def main():
     from instance_lock import acquire_instance_lock
     from runtime_paths import get_backend_dir
     instance_lock = acquire_instance_lock(get_backend_dir(__file__))
+    from queue_db import cancel_app_update
+    cancel_app_update()
     atexit.unregister(cleanup_api_server)
     atexit.register(instance_lock.close)
     atexit.register(cleanup_api_server)

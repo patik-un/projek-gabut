@@ -18,7 +18,7 @@ AUTO_WATCH_CONFIG_FILE = os.path.join(BASE_DIR, "database", "auto_watch.json")
 AUTO_WATCH_LOCK = threading.RLock()
 AUTO_WATCH_LOCK_STATE = threading.local()
 AUTO_COMMIT_LOCK = threading.Lock()
-AUTO_PROCESS_LOCK = threading.Lock()
+AUTO_PROCESS_LOCK = threading.RLock()
 AUTO_PROCESSING_FILES = set()
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
@@ -260,7 +260,10 @@ def process_auto_watch_file(path, drive_folder_id=None):
 
     with AUTO_PROCESS_LOCK:
         if normalized_path in AUTO_PROCESSING_FILES:
-            return
+            return True
+        from queue_db import update_is_paused
+        if update_is_paused():
+            return False
 
         AUTO_PROCESSING_FILES.add(normalized_path)
 
@@ -276,9 +279,22 @@ def process_auto_watch_file(path, drive_folder_id=None):
                 AUTO_PROCESSING_FILES.discard(normalized_path)
 
     threading.Thread(target=run, daemon=True).start()
+    return True
 
 
+def _with_auto_process_lock(function):
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        with AUTO_PROCESS_LOCK:
+            return function(*args, **kwargs)
+    return guarded
+
+
+@_with_auto_process_lock
 def register_auto_watch_file(path, wait_ready=False, allow_auto_process=True):
+    from queue_db import update_is_paused
+    if update_is_paused():
+        return load_auto_watch_config()
     normalized_path = normalize_folder_path(path)
 
     if wait_ready and not wait_until_file_ready(normalized_path, timeout=8):
@@ -322,10 +338,19 @@ def register_auto_watch_file(path, wait_ready=False, allow_auto_process=True):
         )
 
     if config["auto_upload_enabled"] and allow_auto_process:
-        process_auto_watch_file(
+        started = process_auto_watch_file(
             normalized_path,
             drive_folder_id=config["drive_folder_id"] or None
         )
+        if started is False:
+            # Leave the source discoverable after update/cancel. It has not
+            # entered processing and must not remain marked as handled.
+            with _locked_auto_watch_config():
+                current = load_auto_watch_config()
+                if current['folder_path'] == config['folder_path']:
+                    save_auto_watch_config(current['folder_path'], drive_folder_id=current['drive_folder_id'],
+                        enabled=current['enabled'], auto_upload_enabled=current['auto_upload_enabled'],
+                        known_files=set(current['known_files']) - {normalized_path}, pending_files=current['pending_files'])
 
     return saved_config
 

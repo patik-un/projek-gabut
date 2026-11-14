@@ -4,6 +4,7 @@ import time
 import os
 import traceback
 import hashlib
+from contextlib import closing
 from runtime_logging import configure_console_output
 
 configure_console_output()
@@ -33,6 +34,8 @@ def init_db():
 
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cur = conn.cursor()
+
+    cur.execute('CREATE TABLE IF NOT EXISTS update_control (id INTEGER PRIMARY KEY CHECK(id=1), pause_until REAL NOT NULL)')
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS queue (
@@ -597,6 +600,39 @@ def recover_retryable_failed_jobs(max_retry=10):
 # =========================
 # SAFE ATOMIC GET NEXT JOB (ANTI DOUBLE UPLOAD)
 # =========================
+def update_is_paused(conn=None):
+    own_connection = conn is None
+    if own_connection:
+        conn = sqlite3.connect(DB_FILE)
+    try:
+        row = conn.execute('SELECT pause_until FROM update_control WHERE id=1').fetchone()
+        return bool(row and row[0] > time.time())
+    except sqlite3.OperationalError as error:
+        if 'no such table' not in str(error):
+            raise
+        return False
+    finally:
+        if own_connection:
+            conn.close()
+
+
+def prepare_app_update():
+    init_db()
+    with closing(sqlite3.connect(DB_FILE)) as conn, conn:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('INSERT OR REPLACE INTO update_control VALUES (1, ?)', (time.time() + 120,))
+        processing = conn.execute("SELECT COUNT(*) FROM queue WHERE status='processing'").fetchone()[0]
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='delivery_jobs'").fetchone():
+            processing += conn.execute("SELECT COUNT(*) FROM delivery_jobs WHERE state='processing'").fetchone()[0]
+    return processing
+
+
+def cancel_app_update():
+    init_db()
+    with closing(sqlite3.connect(DB_FILE)) as conn, conn:
+        conn.execute('DELETE FROM update_control WHERE id=1')
+
+
 def get_next():
 
     with lock:
@@ -604,6 +640,10 @@ def get_next():
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
+
+        if update_is_paused(conn):
+            conn.close()
+            return None
 
         # ambil 1 job
         cur.execute("""

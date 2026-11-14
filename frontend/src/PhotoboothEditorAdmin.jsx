@@ -4,7 +4,7 @@ import { persistEditorCatalog } from "./editorCatalogStorage.js";
 import PhotoboothDesignStudio from "./PhotoboothDesignStudio.jsx";
 import DecorationArtwork from "./DecorationArtwork.jsx";
 
-export default function PhotoboothEditorAdmin({ settings, apiUrl, onSaved, error, onRetry }) {
+export default function PhotoboothEditorAdmin({ settings, apiUrl, onSaved, error, onRetry, onUpdateBusy }) {
   const [{ draft, dirty, past = [], future = [] }, dispatch] = useReducer(editorCatalogReducer, { draft: settings, dirty: false });
   const latestDraft = useRef(draft);
   latestDraft.current = draft;
@@ -15,6 +15,9 @@ export default function PhotoboothEditorAdmin({ settings, apiUrl, onSaved, error
   const [saveError, setSaveError] = useState(false);
   const savingRef = useRef(false);
   const [designer, setDesigner] = useState(null);
+  useEffect(() => { onUpdateBusy?.(saving || uploading || dirty || Boolean(designer));
+    return () => onUpdateBusy?.(false);
+  }, [saving, uploading, dirty, designer, onUpdateBusy]);
   useEffect(() => { dispatch({ type: "load", settings }); }, [settings]);
   const update = (collection, items) => {
     dispatch({ type: "edit", draft: { ...draft, [collection]: items } });

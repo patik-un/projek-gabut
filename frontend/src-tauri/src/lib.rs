@@ -13,6 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 
 use tauri::{Manager, RunEvent, WindowEvent};
+mod updater;
 
 #[derive(Debug)]
 struct AppError(String);
@@ -42,7 +43,8 @@ struct BackendProcess {
 
 fn new_api_token() -> Result<String, String> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|error| format!("Gagal membuat sesi aplikasi: {}", error))?;
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("Gagal membuat sesi aplikasi: {}", error))?;
     Ok(bytes.iter().map(|byte| format!("{:02x}", byte)).collect())
 }
 
@@ -279,7 +281,14 @@ fn spawn_backend(state: &BackendProcess) -> Result<std::process::Child, String> 
 }
 
 #[tauri::command]
-fn start_backend(state: tauri::State<BackendProcess>) -> Result<(), String> {
+fn start_backend(app: tauri::AppHandle, state: tauri::State<BackendProcess>) -> Result<(), String> {
+    if app
+        .state::<updater::UpdateState>()
+        .installing
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err("Aplikasi sedang memasang update".into());
+    }
     let mut backend = state
         .child
         .lock()
@@ -402,6 +411,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updater::UpdateState::default())
         .setup(|app| {
             let (python_path, backend_dir, data_dir) = if cfg!(debug_assertions) {
                 dev_backend_paths().map_err(|e| app_err!("Dev path: {}", e))?
@@ -449,7 +460,15 @@ pub fn run() {
 
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![pick_folder_path, start_backend, backend_api_token])
+        .invoke_handler(tauri::generate_handler![
+            pick_folder_path,
+            start_backend,
+            backend_api_token,
+            updater::check_app_update,
+            updater::download_app_update,
+            updater::install_app_update,
+            updater::cancel_app_update
+        ])
         .build(tauri::generate_context!())
         .expect("❌ Error while building tauri application")
         .run(|app, event| match event {
@@ -485,13 +504,20 @@ mod tests {
             extern "system" {
                 fn GetConsoleWindow() -> *mut std::ffi::c_void;
             }
-            assert!(unsafe { GetConsoleWindow().is_null() }, "Backend created a console window");
+            assert!(
+                unsafe { GetConsoleWindow().is_null() },
+                "Backend created a console window"
+            );
             return;
         }
 
         let make_probe = || {
             let mut command = Command::new(std::env::current_exe().unwrap());
-            command.args(["--exact", "tests::backend_launch_does_not_create_a_console_window", "--nocapture"]);
+            command.args([
+                "--exact",
+                "tests::backend_launch_does_not_create_a_console_window",
+                "--nocapture",
+            ]);
             command.env(PROBE, "1");
             command
         };
@@ -499,13 +525,23 @@ mod tests {
         // CI may have no inherited console. Explicitly create one to verify the
         // probe detects a console, then check the real background-launch policy.
         const CREATE_NEW_CONSOLE: u32 = 0x00000010;
-        let visible_console = make_probe().creation_flags(CREATE_NEW_CONSOLE).output().unwrap();
-        assert!(!visible_console.status.success(), "Console probe did not detect an explicitly created console");
+        let visible_console = make_probe()
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .output()
+            .unwrap();
+        assert!(
+            !visible_console.status.success(),
+            "Console probe did not detect an explicitly created console"
+        );
         let mut hidden_backend = make_probe();
         super::configure_backend_process(&mut hidden_backend);
         let result = hidden_backend.output().unwrap();
-        assert!(result.status.success(), "Hidden backend probe failed: {}{}",
-            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        assert!(
+            result.status.success(),
+            "Hidden backend probe failed: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 
     #[test]

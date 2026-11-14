@@ -46,6 +46,8 @@ def process_delivery(job_id, force=False, create_folder=None, share=None, enqueu
             raise ValueError('Delivery job tidak ditemukan')
         if row['state'] == 'done' or (row['state'] == 'failed' and not force):
             return json.loads(row['result'])
+        if queue_db.update_is_paused(conn):
+            return {'queued': True, 'delivery_id': job_id}
         if row['next_attempt'] > time.time() and (row['state'] == 'processing' or not force):
             return {'queued': True, 'delivery_id': job_id}
         conn.execute("UPDATE delivery_jobs SET state='processing', next_attempt=? WHERE id=?", (time.time() + 900, job_id))

@@ -34,6 +34,8 @@ backend/photobooth_strips/
 frontend/node_modules/
 
 # Tauri
+.update-signing/
+frontend/update-release/
 frontend/src-tauri/target/
 frontend/src-tauri/backend/
 frontend/src-tauri/backend-bin/

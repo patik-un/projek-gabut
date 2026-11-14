@@ -12,6 +12,8 @@ import PhotoboothGifResults from "./PhotoboothGifResults.jsx";
 import { animatedStripOverlays, photoGifFrames, requestGifAssets } from "./photoboothGif.js";
 import sisikitaCompanyLogo from "./assets/sisikita-company-logo.png";
 import "./App.css";
+import AppUpdates from './AppUpdates.jsx';
+import { updateBusyReason } from './appUpdater.js';
 
 const API_URL = "http://127.0.0.1:8000";
 const DEFAULT_WATERMARK_SETTINGS = {
@@ -944,7 +946,8 @@ const mergeWatermarkData = (current, data, uploadOrientation = null) => {
   };
 };
 
-function App() {
+function App({ onBusyChange }) {
+  const [editorUpdateBusy, setEditorUpdateBusy] = useState(false);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const watchSettingsRevisionRef = useRef(0);
@@ -6395,6 +6398,15 @@ const hasMovedCarouselRef = useRef(false);
     runStartupChecks,
   ]);
 
+  const updateReason = updateBusyReason({
+    session: photoboothStep >= 3,
+    capturing: isCapturing || isFinalizingPhotobooth || isPreparingPhotoboothGif,
+    printing: isPrintingStrip,
+    saving: editorUpdateBusy || isUploading || isUploadingWatermark || isUploadingTemplate ||
+      isUploadingPhotoboothDrive || isSavingWatchFolder || isRunningStartup || isVerifyingGoogleToken || isConnectingDrive,
+  });
+  useEffect(() => { onBusyChange(updateReason); }, [updateReason, onBusyChange]);
+
   const watermarkPanel = (
     <div className="watermark-panel">
       <div>
@@ -9894,7 +9906,7 @@ onPointerMove={onEditCropPointerMove}
                 </div>
               </section>
 
-              <PhotoboothEditorAdmin settings={editorCatalog} apiUrl={API_URL} onSaved={commitEditorCatalog}
+              <PhotoboothEditorAdmin settings={editorCatalog} apiUrl={API_URL} onSaved={commitEditorCatalog} onUpdateBusy={setEditorUpdateBusy}
                 error={editorCatalogError} onRetry={() => setEditorCatalogReload((value) => value + 1)} />
 
               <section className="admin-card sparse admin-col-left">
@@ -10593,4 +10605,9 @@ onPointerMove={onEditCropPointerMove}
   );
 }
 
-export default App;
+export default function UpdatedApp() {
+  const [busyReason, setBusyReason] = useState('');
+  const [locked, setLocked] = useState(false);
+  return <><div inert={locked} aria-busy={locked}><App onBusyChange={setBusyReason} /></div>
+    <AppUpdates busyReason={busyReason} onLock={setLocked} /></>;
+}

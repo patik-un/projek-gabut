@@ -7,15 +7,23 @@ on:
         description: Upload build logs
         type: boolean
         default: true
+      signed_release:
+        description: 'Public signed release JSON from local signing (leave empty for a test build)'
+        type: string
+        required: false
   push:
     branches:
       - main
       - master
 
+permissions:
+  contents: read
+
 jobs:
   build-windows-installer:
     name: Build NSIS installer
     runs-on: windows-latest
+    if: ${{ !inputs.signed_release }}
 
     steps:
       - name: Checkout repository
@@ -85,7 +93,7 @@ jobs:
         working-directory: frontend
         shell: pwsh
         run: |
-          npm run tauri build -- --bundles nsis 2>&1 | Tee-Object -FilePath windows-build.log
+          npm run tauri build -- --bundles nsis --config src-tauri/tauri.ci.conf.json 2>&1 | Tee-Object -FilePath windows-build.log
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -115,3 +123,24 @@ jobs:
             frontend/src-tauri/target/pyinstaller-build/**/warn-*.txt
             frontend/src-tauri/target/pyinstaller-build/**/*.html
           if-no-files-found: ignore
+
+  publish-stable-release:
+    name: Publish signed stable release
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.signed_release != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: event-booth-stable-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED_RELEASE: ${{ inputs.signed_release }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          node frontend/scripts/publish-local-update.mjs

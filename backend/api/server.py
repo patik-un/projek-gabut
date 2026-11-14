@@ -90,6 +90,7 @@ session_owner = None
 session_owner_expires = 0
 session_owner_lock = threading.Lock()
 capture_operation_locks = weakref.WeakKeyDictionary()
+active_update_mutations = 0
 
 LOCAL_APP_ORIGINS = [
     "http://localhost:1420",
@@ -109,7 +110,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def enforce_local_app_origin(request: Request, call_next):
-    global session_owner, session_owner_expires
+    global session_owner, session_owner_expires, active_update_mutations
     origin = request.headers.get("origin")
     if origin is not None and origin not in LOCAL_APP_ORIGINS:
         return JSONResponse(
@@ -125,12 +126,23 @@ async def enforce_local_app_origin(request: Request, call_next):
     if token and request.method != "OPTIONS" and request.url.path != "/" and not public_media:
         if not secrets.compare_digest(request.headers.get("x-event-booth-token", ""), token):
             return JSONResponse(status_code=401, content={"success": False, "message": "Sesi aplikasi tidak valid"})
+    import queue_db
+    mutation = request.method not in ("GET", "HEAD", "OPTIONS") and not request.url.path.startswith("/system/update/")
+    if mutation and queue_db.update_is_paused():
+        return JSONResponse(status_code=503, content={"success": False, "message": "Aplikasi sedang menyiapkan update. Tunggu atau batalkan update."})
+    if mutation:
+        active_update_mutations += 1
     serialized = request.url.path in ("/capture", "/photobooth/session/start", "/photobooth/session/finish")
     capture_lock = None
     if serialized:
         loop = asyncio.get_running_loop()
         capture_lock = capture_operation_locks.setdefault(loop, asyncio.Lock())
-        await capture_lock.acquire()
+        try:
+            await capture_lock.acquire()
+        except BaseException:
+            if mutation:
+                active_update_mutations -= 1
+            raise
     try:
         if serialized or request.url.path == "/captures":
             with session_owner_lock:
@@ -142,8 +154,29 @@ async def enforce_local_app_origin(request: Request, call_next):
                     session_owner_expires = time.monotonic() + 120
         return await call_next(request)
     finally:
+        if mutation:
+            active_update_mutations -= 1
         if serialized:
             capture_lock.release()
+
+
+@app.post("/system/update/prepare")
+def prepare_system_update():
+    import queue_db
+    from detect.detect import AUTO_PROCESS_LOCK, AUTO_PROCESSING_FILES
+    # Packaged backend runs the detector and API in the same process. Holding
+    # this lock closes the race between a new processing thread and queue pause.
+    with AUTO_PROCESS_LOCK:
+        processing = queue_db.prepare_app_update() + len(AUTO_PROCESSING_FILES)
+    return {"ready": processing == 0 and active_update_mutations == 0,
+            "processing": processing, "active_requests": active_update_mutations}
+
+
+@app.post("/system/update/cancel")
+async def cancel_system_update():
+    import queue_db
+    queue_db.cancel_app_update()
+    return {"success": True}
 
 
 DEFAULT_CAMERA_INDEX = "auto"
