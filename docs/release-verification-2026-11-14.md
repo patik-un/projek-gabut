@@ -13,6 +13,7 @@
 ## Verifikasi lokal
 
 - 117 tes frontend lulus.
+- Patch dependensi kompatibel diterapkan: Vite 7.3.8 beserta dependensi transitif; npm audit melaporkan 0 kerentanan.
 - 121 tes backend lulus.
 - 2 tes Rust lulus.
 - Pemeriksaan versi rilis lulus: 0.1.2.
@@ -20,7 +21,7 @@
 - Smoke test binary paket lulus: health, autentikasi instance, provider default, tiga capture sintetis, penolakan capture keempat dan reset sesi. Data dan proses uji dibersihkan otomatis.
 - Simulasi batasan Windows CreateProcess pada suite bridge kamera: 4 tes lulus.
 - Review kode independen menemukan error permanen Drive dan fixture kamera Windows; keduanya diperbaiki dan diperiksa dengan reproduksi gagal lalu lulus.
-- Scan pola kredensial pada 32 file kode tidak menemukan kredensial; file auth, token, binary dan data runtime tidak disertakan dalam commit.
+- Scan pola kredensial pada file kode yang dikirim tidak menemukan kredensial; file auth, token, binary dan data runtime tidak disertakan dalam commit.
 
 ## Temuan runner Windows
 
