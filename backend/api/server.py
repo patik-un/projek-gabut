@@ -1632,11 +1632,19 @@ def get_printers_unix():
             "status": "default",
         })
 
+    # Treat "no printers configured" (Bad file descriptor / empty list) as success,
+    # not as an error. lpstat on macOS returns non-zero when CUPS has no printers
+    # registered, which is a normal state — not a failure worth surfacing to the user.
+    stderr_text = printers_output.stderr.strip()
+    is_no_printer_error = printers_output.returncode != 0 and not printers and (
+        "bad file descriptor" in stderr_text.lower()
+        or not stderr_text
+    )
     return {
-        "success": printers_output.returncode == 0 or bool(printers),
+        "success": printers_output.returncode == 0 or bool(printers) or is_no_printer_error,
         "printers": printers,
         "default_printer": default_printer,
-        "message": printers_output.stderr.strip() if printers_output.returncode != 0 else "",
+        "message": "" if (printers_output.returncode == 0 or is_no_printer_error) else stderr_text,
     }
 
 
@@ -1655,18 +1663,26 @@ def get_printers_windows():
         )
 
     try:
-        raw_printers = win32print.EnumPrinters(2)
+        # PRINTER_ENUM_LOCAL (2) | PRINTER_ENUM_CONNECTIONS (4) = 6, Level 2
+        # Level 2 mengembalikan dict per printer, bukan tuple, sehingga aman diakses.
+        raw_printers = win32print.EnumPrinters(6, None, 2)
         printers = []
-        default_name = None
 
         for p in raw_printers:
+            # p adalah dict: {'pPrinterName', 'Status', 'Attributes', ...}
+            # Status == 0 berarti siap; non-zero berarti ada masalah/sedang cetak.
             printers.append({
-                "name": p[2],
-                "status": "ready" if p[4] == 0 else "busy",
+                "name": p["pPrinterName"],
+                "status": "ready" if p.get("Status", 0) == 0 else "busy",
             })
 
-        default_printer_handle = win32print.GetDefaultPrinter()
-        default_name = default_printer_handle
+        # GetDefaultPrinter() bisa throw jika belum ada printer default.
+        # Tangani secara terpisah agar daftar printer tetap bisa ditampilkan.
+        default_name = None
+        try:
+            default_name = win32print.GetDefaultPrinter()
+        except Exception:
+            pass
 
         return {
             "success": True,
