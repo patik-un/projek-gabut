@@ -90,6 +90,10 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: Run native Windows regression tests
+        working-directory: frontend/src-tauri
+        run: cargo test --release --locked
+
       - name: Smoke test packaged Windows backend
         shell: pwsh
         run: ./frontend/scripts/smoke-windows-backend.ps1

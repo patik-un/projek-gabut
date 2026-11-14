@@ -234,6 +234,24 @@ fn clear_backend_lock(data_dir: &PathBuf) {
     let _ = fs::remove_file(&lock_path);
 }
 
+fn configure_backend_process(command: &mut StdCommand) {
+    #[cfg(unix)]
+    command.process_group(0);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        // Supply valid standard handles even when the GUI has no console.
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    }
+}
+
 fn spawn_backend(state: &BackendProcess) -> Result<std::process::Child, String> {
     let mut command = StdCommand::new(&state.executable_path);
     if state.debug_backend {
@@ -253,15 +271,7 @@ fn spawn_backend(state: &BackendProcess) -> Result<std::process::Child, String> 
         }
     }
 
-    #[cfg(unix)]
-    command.process_group(0);
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    }
+    configure_backend_process(&mut command);
 
     command
         .spawn()
@@ -462,6 +472,39 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(windows)]
+    #[test]
+    fn backend_launch_does_not_create_a_console_window() {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+
+        const PROBE: &str = "EVENT_BOOTH_TEST_CONSOLE_PROBE";
+        if std::env::var_os(PROBE).is_some() {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetConsoleWindow() -> *mut std::ffi::c_void;
+            }
+            assert!(unsafe { GetConsoleWindow().is_null() }, "Backend created a console window");
+            return;
+        }
+
+        let make_probe = || {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "tests::backend_launch_does_not_create_a_console_window", "--nocapture"]);
+            command.env(PROBE, "1");
+            command
+        };
+
+        // Prove the probe catches the old behavior before checking the real policy.
+        let old_behavior = make_probe().creation_flags(0x00000200).output().unwrap();
+        assert!(!old_behavior.status.success(), "Console probe did not catch the old launch behavior");
+        let mut hidden_backend = make_probe();
+        super::configure_backend_process(&mut hidden_backend);
+        let result = hidden_backend.output().unwrap();
+        assert!(result.status.success(), "Hidden backend probe failed: {}{}",
+            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    }
 
     #[test]
     fn update_seed_adds_missing_files_without_overwriting_user_data() {
