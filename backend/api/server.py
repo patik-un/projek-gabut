@@ -166,8 +166,12 @@ def prepare_system_update():
     from detect.detect import AUTO_PROCESS_LOCK, AUTO_PROCESSING_FILES
     # Packaged backend runs the detector and API in the same process. Holding
     # this lock closes the race between a new processing thread and queue pause.
-    with AUTO_PROCESS_LOCK:
+    if not AUTO_PROCESS_LOCK.acquire(blocking=False):
+        return {"ready": False, "processing": 1, "active_requests": active_update_mutations}
+    try:
         processing = queue_db.prepare_app_update() + len(AUTO_PROCESSING_FILES)
+    finally:
+        AUTO_PROCESS_LOCK.release()
     return {"ready": processing == 0 and active_update_mutations == 0,
             "processing": processing, "active_requests": active_update_mutations}
 

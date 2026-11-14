@@ -116,8 +116,29 @@ class UpdatePrepareTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await asyncio.to_thread(entered.wait, 1))
                 task = asyncio.create_task(request_app(self.server.app, 'POST', '/system/update/prepare', {}))
                 await asyncio.sleep(.05)
-                self.assertFalse(task.done(), 'Ready cannot be reported before an accepted registration reaches processing')
+                if task.done():
+                    self.assertFalse(json.loads(task.result()[2])['ready'], 'Ready cannot be reported before an accepted registration reaches processing')
             finally:
                 release.set()
                 await asyncio.to_thread(registration.join, 2)
                 if task: await task
+
+    async def test_cancel_is_not_undone_by_prepare_waiting_for_detector_lock(self):
+        from detect import detect
+        entered, release = threading.Event(), threading.Event()
+        def registration():
+            with detect.AUTO_PROCESS_LOCK:
+                entered.set(); release.wait(2)
+        worker = threading.Thread(target=registration)
+        worker.start()
+        prepare = None
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            prepare = asyncio.create_task(request_app(self.server.app, 'POST', '/system/update/prepare', {}))
+            await asyncio.sleep(.05)
+            await request_app(self.server.app, 'POST', '/system/update/cancel', {})
+        finally:
+            release.set()
+            await asyncio.to_thread(worker.join, 2)
+            if prepare: await prepare
+        self.assertFalse(self.queue.update_is_paused())
