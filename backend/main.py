@@ -100,6 +100,12 @@ def start_api_server():
 
 def main():
     global system_running
+    from instance_lock import acquire_instance_lock
+    from runtime_paths import get_backend_dir
+    instance_lock = acquire_instance_lock(get_backend_dir(__file__))
+    atexit.unregister(cleanup_api_server)
+    atexit.register(instance_lock.close)
+    atexit.register(cleanup_api_server)
 
     print("🚀 AUTO PHOTO SYSTEM STARTING...")
 

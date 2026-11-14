@@ -31,6 +31,118 @@ function globalValue(name, context = {}) {
   return vm.runInNewContext(`(${source.slice(declaration.init.start, declaration.init.end)})`, context);
 }
 
+test("permanent Drive delivery errors stop polling and show an actionable failure", async () => {
+  const effect = app.body.body.find((node) => node.type === "ExpressionStatement" &&
+    node.expression.callee?.name === "useEffect" &&
+    source.slice(node.start, node.end).includes("const deliveryId = photoboothDriveResult.delivery_id"))
+    .expression.arguments[0];
+  const timers = [];
+  const context = { backendReady: true, photoboothDriveResult: { queued: true, delivery_id: "job" },
+    API_URL: "http://test", AbortController,
+    requestBackendJson: async () => ({ queued: false, failed: true, delivery_id: "job", message: "Folder tujuan tidak ditemukan" }),
+    window: { setTimeout(callback) { timers.push(callback); }, clearTimeout() {} },
+    setPhotoboothDriveResult(update) { context.result = update(context.photoboothDriveResult); },
+    setPhotoboothDeliveryStatus(update) { context.delivery = update({ drive: "queued" }); },
+    setStatus(message) { context.status = message; },
+  };
+  const cleanup = vm.runInNewContext(`(${source.slice(effect.start, effect.end)})`, context)();
+  await timers[0]();
+  assert.equal(context.delivery.drive, "failed");
+  assert.equal(context.status, "Folder tujuan tidak ditemukan");
+  assert.equal(timers.length, 1);
+  cleanup();
+});
+
+function sessionContext() {
+  const context = {
+    backendReady: true, photoboothDriveConfigured: false, photoboothInitialDriveFolderId: "",
+    API_URL: "http://test", photoboothStripOptions: [], photoboothTemplates: {},
+    selectedPhotoboothStrip: null, photoboothTemplate: null, photoboothPhotoCount: 3,
+    photoboothCaptureCount: 3, photoboothAdminSettings: { mode: "oto" }, activePaperSize: "4r",
+    DEFAULT_SLOT_ADJUSTMENT: {}, decorationRevisionRef: { current: 0 },
+    captureSessionRevisionRef: { current: 0 }, photoboothSessionStartingRef: { current: false },
+    photoboothFinalBase64Ref: { current: null }, captures: [{ id: "old-1" }, { id: "old-2" }],
+    clearPhotoboothGifs() {}, clearAutoCaptureTimers() {},
+    createEmptyPhotoboothTemplate: () => ({ pose_count: 3 }), getStripSlots: () => [{}, {}, {}],
+    getPreferredStripTemplateMode: () => "default", createEmptyStripMap: globalValue("createEmptyStripMap"),
+    window: { setTimeout() {} }, loadCaptures: async () => {}, loadPhotoQueue: async () => {},
+    fetch: async () => ({ ok: true, json: async () => ({ success: true }) }),
+  };
+  // Supply React's state setters while running the production handler outside React.
+  for (const node of app.body.body.filter((node) => node.type === "VariableDeclaration").flatMap((node) => node.declarations)) {
+    if (node.id.type !== "ArrayPattern" || node.init?.callee?.name !== "useState") continue;
+    const [field, setter] = node.id.elements;
+    if (field && setter) context[setter.name] = (value) => {
+      context[field.name] = typeof value === "function" ? value(context[field.name]) : value;
+    };
+  }
+  context.requestBackendJson = (url, options) => requestBackendJson(url, { ...options, fetchImpl: context.fetch });
+  return context;
+}
+
+test("a local photobooth session enters the camera without a configured Drive folder", async () => {
+  const context = sessionContext();
+  await appHandler("handleStartPhotoboothSession", context)();
+  assert.equal(context.photoboothStep, 3);
+  assert.equal(context.captures.length, 0);
+});
+
+test("entering the camera clears old photos before a slow capture refresh finishes", async () => {
+  const context = sessionContext();
+  context.photoboothDriveConfigured = true;
+  let finish;
+  context.loadCaptures = () => new Promise((resolve) => { finish = resolve; });
+  const starting = appHandler("handleStartPhotoboothSession", context)();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(context.photoboothStep, 3);
+  assert.equal(context.captures.length, 0);
+  finish();
+  await starting;
+});
+
+test("capture refresh from before a session reset cannot restore the previous photos", async () => {
+  let finish;
+  const context = { API_URL: "http://test", captureSessionRevisionRef: { current: 0 },
+    requestBackendJson: () => new Promise((resolve) => { finish = resolve; }),
+    captures: [] };
+  context.setCaptures = (value) => { context.captures = value; };
+  const loading = appHandler("loadCaptures", context)();
+  context.captureSessionRevisionRef.current += 1;
+  finish([{ id: "previous-session" }]);
+  await loading;
+  assert.equal(context.captures.length, 0);
+});
+
+test("repeated continue clicks cannot reset a session that is still starting", async () => {
+  const context = sessionContext();
+  let finish;
+  let starts = 0;
+  context.fetch = () => {
+    starts += 1;
+    return new Promise((resolve) => { finish = resolve; });
+  };
+  const start = appHandler("handleStartPhotoboothSession", context);
+  const first = start();
+  await start();
+  assert.equal(starts, 1);
+  finish({ ok: true, json: async () => ({ success: true }) });
+  await first;
+  assert.equal(context.photoboothStep, 3);
+});
+
+test("a rejected session start stays on selection and allows a later retry", async () => {
+  const context = sessionContext();
+  context.photoboothStep = 2;
+  context.fetch = async () => ({ ok: false, status: 409, json: async () => ({ success: false, message: "Sesi sedang digunakan" }) });
+  const start = appHandler("handleStartPhotoboothSession", context);
+  await start();
+  assert.equal(context.photoboothStep, 2);
+  assert.equal(context.status, "Sesi sedang digunakan");
+  context.fetch = async () => ({ ok: true, json: async () => ({ success: true }) });
+  await start();
+  assert.equal(context.photoboothStep, 3);
+});
+
 test("photobooth add-text rejects unpublished and freely typed text", () => {
   const added = [];
   const context = {
@@ -156,7 +268,7 @@ test("double-strip capture sends a three-photo limit and stops after the third p
     photoboothPhotoCount: 3, doubleStripEnabled: true, captures: [{}, {}],
     backendReady: true, isCapturing: false, API_URL: "http://test",
     createEmptyStripMap: globalValue("createEmptyStripMap"),
-    captureBrowserCameraFrame: () => "frame", clearAutoCaptureTimers() {},
+    cameraProvider: "webcam", captureBrowserCameraFrame: () => "frame", clearAutoCaptureTimers() {},
     setIsCapturing() {}, setAutoCaptureCountdown() {}, setAutoCaptureLabel() {},
     setStatus() {}, setShowResult() {}, setSlotPhotoMap() {}, setPhotoboothEditMode() {},
     loadCaptures: async () => { context.captures.push({}); }, loadPhotoQueue: async () => {},

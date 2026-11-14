@@ -1,9 +1,12 @@
 import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 from camera.providers import (
     CameraProviderError,
@@ -13,6 +16,17 @@ from camera.providers import (
 
 
 class NativeSdkBridgeProviderTest(unittest.TestCase):
+    def setUp(self):
+        # Keep the real pipe/process protocol while launching fixtures portably.
+        # Windows CreateProcess does not honor a Python script's POSIX shebang.
+        popen = subprocess.Popen
+        def launch_fixture(args, *positional, **kwargs):
+            command = [sys.executable, *args] if str(args[0]).endswith('.py') else args
+            return popen(command, *positional, **kwargs)
+        launcher = patch('camera.providers.subprocess.Popen', side_effect=launch_fixture)
+        launcher.start()
+        self.addCleanup(launcher.stop)
+
     def make_bridge(self, source):
         directory = tempfile.TemporaryDirectory()
         path = os.path.join(directory.name, "bridge.py")

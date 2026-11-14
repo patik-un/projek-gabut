@@ -7,6 +7,7 @@ import PhotoboothEditorAdmin from "./PhotoboothEditorAdmin.jsx";
 import { DEFAULT_EDITOR_CATALOG, visibleEditorItems, resolveEditorTextItem } from "./photoboothEditor.js";
 import { createTextArtwork, createStickerArtwork, decorationStyle } from "./decorationArtwork.js";
 import DecorationArtwork from "./DecorationArtwork.jsx";
+import StickerTransformControls from "./StickerTransformControls.jsx";
 import PhotoboothGifResults from "./PhotoboothGifResults.jsx";
 import { animatedStripOverlays, photoGifFrames, requestGifAssets } from "./photoboothGif.js";
 import sisikitaCompanyLogo from "./assets/sisikita-company-logo.png";
@@ -957,6 +958,8 @@ function App() {
   const cameraStartIdRef = useRef(0);
   const retryTimer = useRef(null);
   const backendReadyRef = useRef(false);
+  const captureSessionRevisionRef = useRef(0);
+  const photoboothSessionStartingRef = useRef(false);
   const stripGestureRef = useRef(null);
   const stripPhotoWasDraggedRef = useRef(false);
   const stripDragRef = useRef(null);
@@ -1035,6 +1038,8 @@ const hasMovedCarouselRef = useRef(false);
   const [selectedCameraId, setSelectedCameraId] = useState("");
   const [activeCameraLabel, setActiveCameraLabel] = useState("");
   const [cameraPreviewSource, setCameraPreviewSource] = useState("none");
+  const [cameraProvider, setCameraProvider] = useState("webcam");
+  const [cameraProviders, setCameraProviders] = useState([]);
   const [status, setStatus] = useState("Menunggu kamera...");
   const [captures, setCaptures] = useState([]);
   const [photoQueue, setPhotoQueue] = useState([]);
@@ -1658,7 +1663,6 @@ const hasMovedCarouselRef = useRef(false);
   const isOtoPhotoboothMode = (photoboothAdminSettings.mode || "oto") === "oto";
   const photoboothInitialDriveFolderId =
     photoboothAdminSettings.initialDriveFolderId.trim();
-  const photoboothDriveConfigured = Boolean(photoboothInitialDriveFolderId);
   const driveAuthReady = isDriveAuthReady(driveAuthStatus);
   const hasBlockingStartupIssue = startupChecks.some(
     (check) => check.status === "error" && check.required
@@ -1782,8 +1786,9 @@ const hasMovedCarouselRef = useRef(false);
         });
 
   const loadCaptures = async ({ signal } = {}) => {
+    const revision = captureSessionRevisionRef.current;
     const data = await requestBackendJson(`${API_URL}/captures`, { signal });
-    if (!signal?.aborted) setCaptures(data);
+    if (!signal?.aborted && revision === captureSessionRevisionRef.current) setCaptures(data);
   };
 
   const loadQueue = async ({ signal } = {}) => {
@@ -2203,6 +2208,12 @@ const hasMovedCarouselRef = useRef(false);
   };
 
   const startBrowserCamera = async () => {
+    if (cameraProvider !== "webcam") {
+      stopBrowserCamera();
+      setCameraPreviewSource("backend");
+      setStreamVersion(Date.now());
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia) {
       setStatus("Browser tidak mendukung akses kamera");
       setCameraActive(false);
@@ -2706,7 +2717,7 @@ const hasMovedCarouselRef = useRef(false);
     window.clearTimeout(retryTimer.current);
 
     return undefined;
-  }, [activeView, photoboothStep, selectedCameraId, photoboothAdminSettings.mode]);
+  }, [activeView, photoboothStep, selectedCameraId, photoboothAdminSettings.mode, cameraProvider]);
 
   useEffect(() => {
     const isOtoMode = (photoboothAdminSettings.mode || "oto") === "oto";
@@ -2733,7 +2744,19 @@ const hasMovedCarouselRef = useRef(false);
         method: "POST",
       });
     };
-  }, [activeView, backendReady, photoboothStep, photoboothAdminSettings.mode]);
+  }, [activeView, backendReady, photoboothStep, photoboothAdminSettings.mode, cameraProvider]);
+
+  useEffect(() => {
+    if (!backendReady) return;
+    let cancelled = false;
+    requestBackendJson(`${API_URL}/camera/providers`).then((data) => {
+      if (!cancelled) {
+        setCameraProvider(data.selected || "webcam");
+        setCameraProviders(data.providers || []);
+      }
+    }).catch((error) => console.warn("Status provider kamera gagal dibaca", error));
+    return () => { cancelled = true; };
+  }, [backendReady]);
 
   useEffect(() => {
     if (
@@ -2915,6 +2938,7 @@ const hasMovedCarouselRef = useRef(false);
   };
 
   const resetPhotoboothLocalSession = () => {
+    captureSessionRevisionRef.current += 1;
     clearPhotoboothGifs();
     const sessionTemplate = resolvePhotoboothStripSelection(photoboothStripOptions,
       null, photoboothAdminSettings.defaultStripId);
@@ -2969,20 +2993,19 @@ const hasMovedCarouselRef = useRef(false);
   };
 
   const handleStartPhotoboothSession = async () => {
-    clearPhotoboothGifs();
+    if (photoboothSessionStartingRef.current) return;
     if (!backendReady) {
       setStatus("Backend belum siap");
       return;
     }
 
-    if (!photoboothDriveConfigured) {
-      setStatus("Admin harus mengisi Drive Awal Photobooth dulu");
-      window.setTimeout(() => setStatus(""), 3000);
-      return;
-    }
-
+    photoboothSessionStartingRef.current = true;
+    captureSessionRevisionRef.current += 1;
+    clearAutoCaptureTimers();
+    clearPhotoboothGifs();
+    setStatus("Menyiapkan sesi baru...");
     try {
-      const response = await fetch(`${API_URL}/photobooth/session/start`, {
+      const data = await requestBackendJson(`${API_URL}/photobooth/session/start`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -2991,11 +3014,14 @@ const hasMovedCarouselRef = useRef(false);
           drive_folder_id: photoboothInitialDriveFolderId,
         }),
       });
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
+      if (!data.success) {
         throw new Error(data.message || "Gagal memulai sesi");
       }
+
+      // Invalidate refreshes that began while the backend was clearing old files.
+      captureSessionRevisionRef.current += 1;
+      setCaptures([]);
+      setShowResult(false);
 
       const sessionTemplate =
         photoboothStripOptions.find(
@@ -3050,6 +3076,7 @@ const hasMovedCarouselRef = useRef(false);
     } catch (error) {
       setStatus(error.message || "Gagal memulai sesi");
     } finally {
+      photoboothSessionStartingRef.current = false;
       window.setTimeout(() => setStatus(""), 3000);
     }
   };
@@ -3075,6 +3102,7 @@ const hasMovedCarouselRef = useRef(false);
         throw new Error(data.message || "Gagal membersihkan sesi");
       }
 
+      captureSessionRevisionRef.current += 1;
       await loadCaptures();
       await loadPhotoQueue();
       setStatus("Sesi selesai, siap untuk user berikutnya");
@@ -3103,7 +3131,7 @@ const hasMovedCarouselRef = useRef(false);
     setStatus(automatic ? `Mengambil Foto ${captures.length + 1} otomatis...` : "Mengambil foto...");
 
     try {
-      const cameraFrame = captureBrowserCameraFrame();
+      const cameraFrame = cameraProvider === "webcam" ? captureBrowserCameraFrame() : null;
       const capturePayload = {
         max_photo_count: photoboothCaptureCount,
         ...(cameraFrame ? { data_base64: cameraFrame } : {}),
@@ -5643,9 +5671,9 @@ const hasMovedCarouselRef = useRef(false);
       }
 
       setPhotoboothDriveResult(data);
-      setStatus(`Folder ${data.folder_name} dibuat`);
+      setStatus(data.queued ? "Hasil tersimpan lokal; pengiriman Drive akan dicoba ulang otomatis." : `Folder ${data.folder_name} dibuat`);
       loadPhotoQueue().catch(() => {});
-      return true;
+      return data.queued ? "queued" : true;
     } catch (error) {
       setStatus(error.message || "Gagal upload photobooth");
       return false;
@@ -5654,6 +5682,27 @@ const hasMovedCarouselRef = useRef(false);
       window.setTimeout(() => setStatus(""), 3500);
     }
   };
+
+  useEffect(() => {
+    if (!backendReady || !photoboothDriveResult?.queued || !photoboothDriveResult?.delivery_id) return;
+    const controller = new AbortController();
+    const deliveryId = photoboothDriveResult.delivery_id;
+    let timer;
+    const poll = async () => {
+      try {
+        const data = await requestBackendJson(`${API_URL}/photobooth/delivery/${deliveryId}`, { signal: controller.signal });
+        if (!controller.signal.aborted && !data.queued) {
+          setPhotoboothDriveResult((current) => current?.delivery_id === deliveryId ? { ...current, ...data } : current);
+          setPhotoboothDeliveryStatus((current) => ({ ...current, drive: data.failed ? "failed" : "success" }));
+          if (data.failed) setStatus(data.message || "Pengiriman Drive gagal. Periksa folder tujuan dan izin akses.");
+          return;
+        }
+      } catch (error) { if (controller.signal.aborted) return; }
+      if (!controller.signal.aborted) timer = window.setTimeout(poll, 3000);
+    };
+    timer = window.setTimeout(poll, 3000);
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [backendReady, photoboothDriveResult?.queued, photoboothDriveResult?.delivery_id]);
 
   const finalizePhotobooth = async () => {
     if (photoboothFinalizationLockRef.current || isFinalizingPhotobooth || isRenderingPhotoboothPreview) return;
@@ -5699,7 +5748,7 @@ const hasMovedCarouselRef = useRef(false);
 
       await Promise.all([
         preparePhotoboothGifs(composite).then((gifs) => handlePhotoboothDriveUpload(folderName, composite.dataBase64, gifs)).then((success) => {
-          updateDeliveryStatus("drive", success ? "success" : "failed");
+          updateDeliveryStatus("drive", success === "queued" ? "queued" : success ? "success" : "failed");
         }),
         printPhotoboothStrip(composite.dataBase64).then((success) => {
           updateDeliveryStatus("printer", success ? "success" : "failed");
@@ -6614,7 +6663,7 @@ const hasMovedCarouselRef = useRef(false);
     const scaleStep = type === "sticker" ? 0.15 : 0.1;
     return (
       <div className="studio-selection-toolbar">
-        <span>Geser {label} langsung pada strip.</span>
+        <span>{type === "sticker" ? "Tarik stiker untuk geser, sudut untuk ukuran, dan ↻ untuk putar." : "Geser teks langsung pada strip."}</span>
         <div className="selection-btn-group">
           <button type="button" className="secondary-button compact" aria-label={`Perkecil ${label}`}
             onClick={() => updateSelectedDecorationScale(-scaleStep)}>Perkecil</button>
@@ -6692,32 +6741,13 @@ const hasMovedCarouselRef = useRef(false);
                 style={{ width: `${sticker.artwork.widthPercent}cqw` }} />
                 : sticker.type === "image" ? <img className="decoration-image-content" src={sticker.content} alt="Stiker custom" draggable={false} /> : <span className="decoration-emoji-content">{sticker.content}</span>}
               {isSelected && (
-                <div className="decoration-controls-bar">
-                  <button
-                    type="button"
-                    className="decor-btn decor-del"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      handleDeleteDecoration("sticker", sticker.id);
-                    }}
-                    title="Hapus"
-                    aria-label="Hapus stiker"
-                  >
-                    ✕
-                  </button>
-                  <button
-                    type="button"
-                    className="decor-btn decor-rot"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      updateSelectedDecorationRotation(15);
-                    }}
-                    title="Putar"
-                    aria-label="Putar stiker"
-                  >
-                    🔄
-                  </button>
-                </div>
+                <StickerTransformControls
+                  item={sticker}
+                  onChange={(patch) => setStripDecorations((current) => current.map((item) =>
+                    item.id === sticker.id ? { ...item, ...patch } : item
+                  ))}
+                  onDelete={() => handleDeleteDecoration("sticker", sticker.id)}
+                />
               )}
             </div>
           );
@@ -8119,7 +8149,7 @@ const hasMovedCarouselRef = useRef(false);
                   <div className="template-panel-header">
                     <div>
                       <h2>Upload ke Google Drive</h2>
-                      <span>{photoboothDriveResult ? "Folder siap untuk user." : "Strip JPG untuk cetak; GIF digital disertakan ke folder hasil."}</span>
+                      <span>{photoboothDriveResult?.queued ? "Tersimpan lokal; menunggu pengiriman Drive otomatis." : photoboothDriveResult ? "Folder siap; hasil masuk antrean pengiriman." : "Strip JPG untuk cetak; GIF digital disertakan ke folder hasil."}</span>
                     </div>
                   </div>
                   {isUploadingPhotoboothDrive ? (
@@ -8150,10 +8180,12 @@ const hasMovedCarouselRef = useRef(false);
                     </div>
                   ) : (
                     <span className="upload-status-text">
-                      {photoboothDeliveryStatus.drive === "failed"
+                      {photoboothDeliveryStatus.drive === "queued"
+                        ? "Tersimpan lokal, menunggu pengiriman Drive otomatis"
+                        : photoboothDeliveryStatus.drive === "failed"
                         ? "Upload ke Google Drive gagal. Anda dapat mencoba lagi."
                         : photoboothDeliveryStatus.drive === "success"
-                          ? "Strip berhasil disimpan ke Google Drive."
+                          ? "Folder Drive siap; hasil masuk antrean pengiriman."
                           : photoboothDeliveryStatus.drive === "pending"
                             ? "Mengupload strip final ke Google Drive..."
                             : "Belum ada hasil final yang diupload."}
@@ -10329,9 +10361,31 @@ onPointerMove={onEditCropPointerMove}
                 </div>
                 <div className="camera-admin-grid">
                   <div className="camera-device-row">
+                    <span>Jenis kamera</span>
+                    <select value={cameraProvider} disabled={!backendReady} onChange={async (event) => {
+                      try {
+                        const data = await requestBackendJson(`${API_URL}/camera/provider`, {
+                          method: "POST", headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ provider: event.target.value }),
+                          timeoutMs: 20000,
+                        });
+                        stopBrowserCamera();
+                        setCameraProvider(data.selected);
+                        setCameraProviders(data.providers || []);
+                        setStreamVersion(Date.now());
+                        setStatus(data.providers?.find((provider) => provider.id === data.selected)?.message || "Kamera dipilih");
+                      } catch (error) { setStatus(error.message || "Gagal memilih jenis kamera"); }
+                    }}>
+                      {(cameraProviders.length ? cameraProviders : [{ id: "webcam", name: "Webcam / USB Streaming" }]).map((provider) => (
+                        <option key={provider.id} value={provider.id}>{provider.name}{provider.available === false ? " (belum tersedia)" : ""}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="camera-device-row">
                     <span>Perangkat</span>
                     <select
                       value={selectedCameraId}
+                      disabled={cameraProvider !== "webcam"}
                       onChange={(e) => setSelectedCameraId(e.target.value)}
                     >
                       <option value="">Auto — kamera pertama</option>

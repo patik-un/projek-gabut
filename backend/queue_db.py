@@ -213,6 +213,7 @@ def add_to_queue(
 
     with lock:
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
 
         cur.execute("""
@@ -231,6 +232,12 @@ def add_to_queue(
             print(f"   Status   : {existing[1]}")
             print(f"   File     : {file_path}")
             return existing[0]
+
+        cur.execute("SELECT queue_id FROM upload_history WHERE dedupe_key = ? ORDER BY id DESC LIMIT 1", (dedupe_key,))
+        completed = cur.fetchone()
+        if completed:
+            conn.close()
+            return completed[0]
 
         cur.execute("""
             INSERT INTO queue (
@@ -476,6 +483,17 @@ def mark_done(queue_id, drive_file_id=None):
     conn.close()
 
 
+def complete_uploaded_job(queue_id, file_path, drive_file_id):
+    # A durable success record must precede irreversible cleanup.
+    mark_done(queue_id, drive_file_id=drive_file_id)
+    try:
+        os.remove(file_path)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        print(f"⚠️ Upload berhasil; cleanup file ditunda: {error}")
+
+
 # =========================
 # INCREASE RETRY
 # =========================
@@ -581,6 +599,7 @@ def get_next():
     with lock:
 
         conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
 
         # ambil 1 job
@@ -644,6 +663,8 @@ def upload_worker():
             # Large uploads can easily take more than 30 seconds.
             recover_dead_jobs(900)
 
+            from delivery_jobs import process_pending_deliveries
+            process_pending_deliveries()
             item = get_next()
 
             if not item:
@@ -679,11 +700,7 @@ def upload_worker():
             # =========================
             if file_id:
 
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    print(f"🗑 Deleted: {file_path}")
-
-                mark_done(queue_id, drive_file_id=file_id)
+                complete_uploaded_job(queue_id, file_path, file_id)
 
                 print("✅ QUEUE UPLOAD DONE")
                 print(f"   Queue ID : {queue_id}")

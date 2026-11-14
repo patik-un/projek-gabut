@@ -56,6 +56,18 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Run regression tests
+        shell: pwsh
+        run: |
+          Push-Location backend
+          & .venv\Scripts\python.exe -m unittest discover -p "test_*.py"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          Push-Location frontend
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+
       - name: Restore Google OAuth client secrets
         shell: pwsh
         env:
@@ -77,6 +89,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
+
+      - name: Smoke test packaged Windows backend
+        shell: pwsh
+        run: ./frontend/scripts/smoke-windows-backend.ps1
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4

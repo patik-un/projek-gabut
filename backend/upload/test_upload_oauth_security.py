@@ -55,15 +55,18 @@ class DriveTokenSecurityTest(unittest.TestCase):
             payload = json.load(token)
 
         self.assertEqual(payload["refresh_token"], "refresh-token")
-        self.assertEqual(
-            stat.S_IMODE(os.stat(upload_oauth.TOKEN_FILE).st_mode),
-            stat.S_IRUSR | stat.S_IWUSR,
-        )
-        self.assertEqual(stat.S_IMODE(os.stat(upload_oauth.AUTH_DIR).st_mode), 0o700)
-        self.assertEqual(
-            stat.S_IMODE(os.stat(upload_oauth.CLIENT_SECRET_FILE).st_mode),
-            0o600,
-        )
+        # Windows chmod does not implement POSIX owner/group permission bits.
+        # JSON persistence and reload are still verified on every platform.
+        if os.name != "nt":
+            self.assertEqual(
+                stat.S_IMODE(os.stat(upload_oauth.TOKEN_FILE).st_mode),
+                stat.S_IRUSR | stat.S_IWUSR,
+            )
+            self.assertEqual(stat.S_IMODE(os.stat(upload_oauth.AUTH_DIR).st_mode), 0o700)
+            self.assertEqual(
+                stat.S_IMODE(os.stat(upload_oauth.CLIENT_SECRET_FILE).st_mode),
+                0o600,
+            )
         self.assertEqual(
             upload_oauth.load_saved_credentials().refresh_token,
             "refresh-token",

@@ -16,6 +16,7 @@ queue.db
 *.db
 auto_watch.json.lock
 auto_watch.json.commit.lock
+instance.lock
 
 # PyInstaller
 backend/dist/

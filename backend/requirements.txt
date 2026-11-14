@@ -10,3 +10,4 @@ google-api-python-client==2.160.0
 httplib2==0.22.0
 watchdog==6.0.0
 pyinstaller==6.20.0
+pywin32>=306; sys_platform == "win32"

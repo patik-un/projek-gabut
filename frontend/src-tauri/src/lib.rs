@@ -37,6 +37,18 @@ struct BackendProcess {
     sony_bridge: Option<PathBuf>,
     app_version: String,
     debug_backend: bool,
+    api_token: String,
+}
+
+fn new_api_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| format!("Gagal membuat sesi aplikasi: {}", error))?;
+    Ok(bytes.iter().map(|byte| format!("{:02x}", byte)).collect())
+}
+
+#[tauri::command]
+fn backend_api_token(state: tauri::State<BackendProcess>) -> String {
+    state.api_token.clone()
 }
 
 fn merge_dir_missing(source: &PathBuf, destination: &PathBuf) -> io::Result<()> {
@@ -232,6 +244,7 @@ fn spawn_backend(state: &BackendProcess) -> Result<std::process::Child, String> 
         .current_dir(&state.backend_dir)
         .env("EVENT_BOOTH_BACKEND_DATA_DIR", &state.data_dir)
         .env("EVENT_BOOTH_APP_VERSION", &state.app_version)
+        .env("EVENT_BOOTH_API_TOKEN", &state.api_token)
         .env("PHOTOBOOTH_CAMERA_INDEX", "auto");
 
     if let Some(sony_bridge) = &state.sony_bridge {
@@ -408,6 +421,7 @@ pub fn run() {
                 sony_bridge: Some(sony_bridge),
                 app_version: app.package_info().version.to_string(),
                 debug_backend: cfg!(debug_assertions),
+                api_token: new_api_token()?,
             });
 
             println!("Backend ready to start after login");
@@ -425,7 +439,7 @@ pub fn run() {
 
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![pick_folder_path, start_backend])
+        .invoke_handler(tauri::generate_handler![pick_folder_path, start_backend, backend_api_token])
         .build(tauri::generate_context!())
         .expect("❌ Error while building tauri application")
         .run(|app, event| match event {

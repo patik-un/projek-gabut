@@ -11,6 +11,14 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 
+def valid_jpeg():
+    import io
+    from PIL import Image
+    output = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(output, "JPEG")
+    return base64.b64encode(output.getvalue()).decode()
+
+
 async def request_app(app, method, path, payload=None, origin=None, headers=None):
     body = b"" if payload is None else json.dumps(payload).encode()
     request_headers = [(b"host", b"127.0.0.1:8000")]
@@ -172,7 +180,7 @@ class LocalApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(Path(paths[0]).read_bytes(), base64.b64decode(jpeg.split(",")[1]))
             self.assertEqual(Path(paths[1]).read_bytes(), base64.b64decode(gif.split(",")[1]))
             for call in enqueue.call_args_list:
-                self.assertEqual(call.kwargs, {"drive_folder_id": "folder-id", "source": "photobooth"})
+                self.assertEqual(call.kwargs, {"drive_folder_id": "folder-id", "source": "photobooth", "status": "staged"})
 
     async def test_drive_upload_rejects_invalid_gifs_before_google_or_queue_calls(self):
         with patch.object(self.server, "create_drive_folder") as create, patch.object(self.server, "add_to_queue") as enqueue:
@@ -214,7 +222,7 @@ class LocalApiTest(unittest.IsolatedAsyncioTestCase):
              patch.object(self.server, "create_drive_folder", return_value={"id": "folder-id"}), \
              patch.object(self.server, "add_to_queue", return_value=13) as enqueue:
             status, _, body = await request_app(self.server.app, "POST", "/photobooth/drive-upload", {
-                "parent_drive_folder_id": "parent", "folder_name": "job-test", "filename": "strip.jpg", "data_base64": "anBlZw==",
+                "parent_drive_folder_id": "parent", "folder_name": "job-test", "filename": "strip.jpg", "data_base64": valid_jpeg(),
             })
         self.assertEqual(status, 200)
         result = json.loads(body)
@@ -324,10 +332,10 @@ class LocalApiTest(unittest.IsolatedAsyncioTestCase):
                 Path(folder, f"existing-{index}.jpg").write_bytes(b"image")
             for _ in range(14):
                 status, _, _ = await request_app(self.server.app, "POST", "/capture",
-                                                {"max_photo_count": 20, "data_base64": "aW1hZ2U="})
+                                                {"max_photo_count": 20, "data_base64": valid_jpeg()})
                 self.assertEqual(status, 200)
             status, _, _ = await request_app(self.server.app, "POST", "/capture",
-                                            {"max_photo_count": 20, "data_base64": "aW1hZ2U="})
+                                            {"max_photo_count": 20, "data_base64": valid_jpeg()})
             self.assertEqual(status, 409)
 
     async def test_photobooth_settings_reject_invalid_counts_duplicates_and_empty_catalog(self):

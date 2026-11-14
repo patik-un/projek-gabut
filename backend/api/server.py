@@ -14,6 +14,13 @@ import subprocess
 import sys
 import platform
 import math
+import io
+import secrets
+import atexit
+import asyncio
+import weakref
+from PIL import Image, UnidentifiedImageError
+from camera.providers import CameraProviderManager, CameraProviderError
 from api.editor_catalog import normalize_editor_catalog
 from api.sticker_processing import MAX_REQUEST_BYTES, SegmentationError, remove_background
 from api.gif_rendering import MAX_GIF_REQUEST_BYTES, MAX_UPLOAD_REQUEST_BYTES, render_gif, validate_gif_files
@@ -75,6 +82,10 @@ from runtime_paths import get_backend_dir
 # FASTAPI
 # =========================
 app = FastAPI()
+session_owner = None
+session_owner_expires = 0
+session_owner_lock = threading.Lock()
+capture_operation_locks = weakref.WeakKeyDictionary()
 
 LOCAL_APP_ORIGINS = [
     "http://localhost:1420",
@@ -94,19 +105,48 @@ app.add_middleware(
 
 @app.middleware("http")
 async def enforce_local_app_origin(request: Request, call_next):
+    global session_owner, session_owner_expires
     origin = request.headers.get("origin")
     if origin is not None and origin not in LOCAL_APP_ORIGINS:
         return JSONResponse(
             status_code=403,
             content={"success": False, "message": "Origin tidak diizinkan"},
         )
-    return await call_next(request)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    token = os.environ.get("EVENT_BOOTH_API_TOKEN")
+    public_media = request.method == "GET" and request.url.path.startswith((
+        "/output/", "/processed/", "/photobooth-strips/", "/watermark-files/", "/camera-stream",
+    ))
+    if token and request.method != "OPTIONS" and request.url.path != "/" and not public_media:
+        if not secrets.compare_digest(request.headers.get("x-event-booth-token", ""), token):
+            return JSONResponse(status_code=401, content={"success": False, "message": "Sesi aplikasi tidak valid"})
+    serialized = request.url.path in ("/capture", "/photobooth/session/start", "/photobooth/session/finish")
+    capture_lock = None
+    if serialized:
+        loop = asyncio.get_running_loop()
+        capture_lock = capture_operation_locks.setdefault(loop, asyncio.Lock())
+        await capture_lock.acquire()
+    try:
+        if serialized or request.url.path == "/captures":
+            with session_owner_lock:
+                if session_owner_expires <= time.monotonic():
+                    session_owner = None
+                if session_owner and request.headers.get("x-event-booth-session") != session_owner:
+                    return JSONResponse(status_code=409, content={"success": False, "message": "Sesi photobooth sedang digunakan di jendela lain"})
+                if session_owner:
+                    session_owner_expires = time.monotonic() + 120
+        return await call_next(request)
+    finally:
+        if serialized:
+            capture_lock.release()
 
 
 DEFAULT_CAMERA_INDEX = "auto"
 latest_frame = None
 latest_frame_lock = threading.Lock()
 camera_stream_enabled = False
+camera_stream_generation = 0
 camera_stream_lock = threading.Lock()
 camera_props = {}
 camera_props_lock = threading.Lock()
@@ -119,9 +159,16 @@ def set_camera_stream_enabled(enabled):
         camera_stream_enabled = enabled
 
 
-def is_camera_stream_enabled():
+def is_camera_stream_enabled(generation=None):
     with camera_stream_lock:
-        return camera_stream_enabled
+        return camera_stream_enabled and (generation is None or generation == camera_stream_generation)
+
+
+def finish_camera_stream(generation):
+    global camera_stream_enabled
+    with camera_stream_lock:
+        if generation == camera_stream_generation:
+            camera_stream_enabled = False
 
 
 def get_camera_candidates():
@@ -225,6 +272,8 @@ def get_frame_snapshot(timeout_seconds=2):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 BACKEND_DIR = get_backend_dir(__file__)
+camera_manager = CameraProviderManager(BACKEND_DIR)
+atexit.register(camera_manager.close)
 
 PROCESSED_DIR = os.path.join(
     BACKEND_DIR,
@@ -375,15 +424,23 @@ def check_image_file(path, label, optional=True):
 
 
 def decode_base64_image(data_base64):
-    if not data_base64:
+    if not isinstance(data_base64, str) or not data_base64:
         raise ValueError("Data file kosong")
+
+    if len(data_base64) > 24 * 1024 * 1024:
+        raise ValueError("Data gambar terlalu besar")
 
     if "," in data_base64:
         data_base64 = data_base64.split(",", 1)[1]
 
     try:
-        return base64.b64decode(data_base64)
-    except (binascii.Error, ValueError) as error:
+        image_bytes = base64.b64decode(data_base64, validate=True)
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            if image.format not in ("PNG", "JPEG", "WEBP") or image.width * image.height > 24 * 1024 * 1024:
+                raise ValueError("Format atau dimensi gambar tidak didukung")
+            image.verify()
+        return image_bytes
+    except (binascii.Error, ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError) as error:
         raise ValueError("Data file tidak valid") from error
 
 
@@ -452,23 +509,35 @@ def safe_filename(filename, fallback="upload.jpg"):
     return cleaned or fallback
 
 
+# A Windows preview/download can keep an old JPEG locked during session cleanup.
+# Those files may stay on disk, but must never count toward the next session.
+retired_capture_files = frozenset()
+
+
 def get_capture_files():
     return sorted(
-        glob.glob(os.path.join(OUTPUT_DIR, "*.jpg")),
+        (path for path in glob.glob(os.path.join(OUTPUT_DIR, "*.jpg"))
+         if path not in retired_capture_files),
         key=os.path.getmtime,
         reverse=True
     )
 
 
 def clear_capture_files():
+    global retired_capture_files
     deleted = 0
+    locked = set()
 
-    for file_path in get_capture_files():
+    # Retry files retired by earlier sessions once Windows releases their handles.
+    for file_path in glob.glob(os.path.join(OUTPUT_DIR, "*.jpg")):
         try:
             os.remove(file_path)
             deleted += 1
         except OSError as error:
+            locked.add(file_path)
             print(f"⚠️ Gagal menghapus capture {file_path}: {error}")
+
+    retired_capture_files = frozenset(locked)
 
     with latest_frame_lock:
         global latest_frame
@@ -750,12 +819,7 @@ def get_queue(request: Request):
 @app.get("/latest-capture")
 def latest_capture():
 
-    files = glob.glob(
-        os.path.join(
-            OUTPUT_DIR,
-            "*.jpg"
-        )
-    )
+    files = get_capture_files()
 
     if not files:
 
@@ -793,6 +857,13 @@ def get_captures():
 
 @app.post("/photobooth/session/start")
 async def start_photobooth_session(request: Request):
+    global session_owner, session_owner_expires
+    owner = request.headers.get("x-event-booth-session")
+    with session_owner_lock:
+        if session_owner and owner != session_owner:
+            return JSONResponse(status_code=409, content={"success": False, "message": "Sesi sedang digunakan"})
+        session_owner = owner
+        session_owner_expires = time.monotonic() + 120
     raw_body = await request.body()
     try:
         payload = json.loads(raw_body) if raw_body else {}
@@ -811,7 +882,10 @@ async def start_photobooth_session(request: Request):
 
 @app.post("/photobooth/session/finish")
 def finish_photobooth_session():
+    global session_owner
     deleted = clear_capture_files()
+    with session_owner_lock:
+        session_owner = None
 
     return {
         "success": True,
@@ -1449,11 +1523,11 @@ async def upload_photobooth_drive(request: Request):
     if not folder_name:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         folder_name = f"job_{timestamp}"
-    strip_filename = f"{folder_name}_{os.path.basename(filename)}"
+    strip_filename = f"{uuid.uuid4().hex}_{safe_filename(filename)}"
     strip_path = os.path.join(PHOTOBOOTH_STRIP_DIR, strip_filename)
 
     try:
-        save_base64_file(payload.get("data_base64"), strip_path)
+        await run_in_threadpool(save_base64_file, payload.get("data_base64"), strip_path)
     except ValueError as error:
         return JSONResponse(
             status_code=400,
@@ -1463,50 +1537,35 @@ async def upload_photobooth_drive(request: Request):
             }
         )
 
-    try:
-        folder = create_drive_folder(folder_name, parent_folder_id=parent_drive_folder_id)
-    except DriveUploadError as error:
-        return JSONResponse(
-            status_code=502,
-            content={
-                "success": False,
-                "message": f"Gagal membuat folder Google Drive: {error}"
-            }
-        )
-
-    share_warning = None
-
-    if email:
-        try:
-            share_drive_file(folder["id"], email)
-        except DriveUploadError as error:
-            share_warning = str(error)
-
-    queue_id = add_to_queue(
-        strip_path,
-        drive_folder_id=folder["id"],
-        source="photobooth"
-    )
-
-    gif_queue_ids = []
+    attachment_paths = []
     for index, (gif_filename, gif_bytes) in enumerate(gif_files):
-        attachment_name = f"{safe_filename(folder_name)}_{uuid.uuid4().hex[:12]}_{index}_{gif_filename}"
-        attachment_path = os.path.join(PHOTOBOOTH_STRIP_DIR, attachment_name)
-        with open(attachment_path, "wb") as attachment:
-            attachment.write(gif_bytes)
-        gif_queue_ids.append(add_to_queue(attachment_path, drive_folder_id=folder["id"], source="photobooth"))
+        attachment_path = os.path.join(PHOTOBOOTH_STRIP_DIR, f"{uuid.uuid4().hex}_{index}_{gif_filename}")
+        await run_in_threadpool(lambda path=attachment_path, data=gif_bytes: open_and_write(path, data))
+        attachment_paths.append(attachment_path)
 
+    from delivery_jobs import stage_delivery, process_delivery
+    delivery_id = await run_in_threadpool(stage_delivery, folder_name, parent_drive_folder_id, email, strip_path, attachment_paths)
+    result = await run_in_threadpool(process_delivery, delivery_id, create_folder=create_drive_folder, share=share_drive_file, enqueue=add_to_queue)
+    if result.get('failed'):
+        return JSONResponse(status_code=422, content={'success': False, **result})
     return {
-        "success": True,
-        "gif_queue_ids": gif_queue_ids,
-        "folder_name": folder_name,
-        "folder_id": folder["id"],
-        "folder_url": folder.get("webViewLink"),
-        "shared_to": email if email and not share_warning else None,
-        "share_warning": share_warning,
-        "queue_id": queue_id,
-        "image_url": public_url(strip_path)
+        "success": True, "folder_name": folder_name,
+        "image_url": public_url(strip_path), **result,
     }
+
+
+def open_and_write(path, data):
+    with open(path, "wb") as file:
+        file.write(data)
+
+
+@app.get("/photobooth/delivery/{job_id}")
+def get_delivery_status(job_id: str):
+    from delivery_jobs import delivery_status
+    result = delivery_status(job_id)
+    if result is None:
+        return JSONResponse(status_code=404, content={"success": False, "message": "Pengiriman tidak ditemukan"})
+    return {"success": True, **result}
 
 
 @app.get("/printers")
@@ -1625,7 +1684,10 @@ def get_printers_windows():
 
 @app.post("/photobooth/print")
 async def print_photobooth_strip(request: Request):
-    payload = await request.json()
+    try:
+        payload = await read_bounded_json(request, MAX_UPLOAD_REQUEST_BYTES)
+    except ValueError as error:
+        return JSONResponse(status_code=400, content={"success": False, "message": str(error)})
     printer_name = str(payload.get("printer_name") or "").strip()
     paper_size = str(payload.get("paper_size") or "4r").strip().lower()
     if paper_size not in ("3r", "4r"):
@@ -1647,7 +1709,7 @@ async def print_photobooth_strip(request: Request):
         )
 
     try:
-        save_base64_file(payload.get("data_base64"), print_file)
+        await run_in_threadpool(save_base64_file, payload.get("data_base64"), print_file)
     except ValueError as error:
         return JSONResponse(
             status_code=400,
@@ -1658,9 +1720,9 @@ async def print_photobooth_strip(request: Request):
         )
 
     if sys.platform == "win32":
-        result = print_file_windows(printer_name, print_file, paper_size=paper_size)
+        result = await run_in_threadpool(print_file_windows, printer_name, print_file, paper_size=paper_size)
     else:
-        result = print_file_unix(printer_name, print_file, paper_size=paper_size)
+        result = await run_in_threadpool(print_file_unix, printer_name, print_file, paper_size=paper_size)
 
     if result is not None:
         return result
@@ -1720,7 +1782,11 @@ def print_file_unix(printer_name, print_file, paper_size="4r"):
 
 def print_file_windows(printer_name, print_file, paper_size="4r"):
     try:
-        import win32api
+        import win32print
+        import win32gui
+        import win32ui
+        import win32con
+        from PIL import ImageWin
     except ImportError:
         return JSONResponse(
             status_code=500,
@@ -1730,17 +1796,38 @@ def print_file_windows(printer_name, print_file, paper_size="4r"):
             }
         )
 
+    printer = dc = None
+    started = False
     try:
-        win32api.SetDefaultPrinter(printer_name)
-        win32api.ShellExecute(
-            0,
-            "print",
-            print_file,
-            None,
-            ".",
-            0
-        )
+        printer = win32print.OpenPrinter(printer_name)
+        devmode = win32print.GetPrinter(printer, 2)["pDevMode"]
+        if devmode is None:
+            raise ValueError("Driver printer tidak menyediakan pengaturan kertas")
+        devmode.PaperSize = 0
+        devmode.PaperWidth, devmode.PaperLength = (889, 1270) if paper_size == "3r" else (1016, 1524)
+        devmode.Orientation = win32con.DMORIENT_PORTRAIT
+        devmode.Fields |= win32con.DM_PAPERSIZE | win32con.DM_PAPERWIDTH | win32con.DM_PAPERLENGTH | win32con.DM_ORIENTATION
+        dc = win32ui.CreateDCFromHandle(win32gui.CreateDC("WINSPOOL", printer_name, devmode))
+        width = dc.GetDeviceCaps(win32con.HORZRES)
+        height = dc.GetDeviceCaps(win32con.VERTRES)
+        with Image.open(print_file) as source:
+            image = source.convert("RGB")
+            scale = min(width / image.width, height / image.height)
+            drawn_width, drawn_height = round(image.width * scale), round(image.height * scale)
+            left, top = (width - drawn_width) // 2, (height - drawn_height) // 2
+            dc.StartDoc("Event Booth Studio")
+            started = True
+            dc.StartPage()
+            ImageWin.Dib(image).draw(dc.GetHandleOutput(), (left, top, left + drawn_width, top + drawn_height))
+            dc.EndPage()
+            dc.EndDoc()
+            started = False
     except Exception as error:
+        if started and dc is not None:
+            try:
+                dc.AbortDoc()
+            except Exception:
+                pass
         return JSONResponse(
             status_code=500,
             content={
@@ -1748,6 +1835,11 @@ def print_file_windows(printer_name, print_file, paper_size="4r"):
                 "message": f"Gagal mencetak: {error}"
             }
         )
+    finally:
+        if dc is not None:
+            dc.DeleteDC()
+        if printer is not None:
+            win32print.ClosePrinter(printer)
 
     return None
 
@@ -2089,20 +2181,36 @@ async def cleanup_manual_uploads_endpoint(request: Request):
 
 def generate_camera_frames():
 
-    global latest_frame
+    global latest_frame, camera_stream_enabled, camera_stream_generation
+    with camera_stream_lock:
+        camera_stream_enabled = True
+        camera_stream_generation += 1
+        generation = camera_stream_generation
 
-    set_camera_stream_enabled(True)
+    if camera_manager.selected != "webcam":
+        try:
+            while is_camera_stream_enabled(generation):
+                jpeg = camera_manager.preview_jpeg()
+                if jpeg:
+                    yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                time.sleep(0.06)
+        except CameraProviderError as error:
+            print(f"Preview SDK berhenti: {error}")
+        finally:
+            finish_camera_stream(generation)
+        return
 
     cap = open_camera()
 
     if cap is None:
         print("❌ Kamera gagal dibuka dari server.py")
+        finish_camera_stream(generation)
         return
 
     print("✅ Kamera stream aktif dari server.py")
 
     try:
-        while is_camera_stream_enabled():
+        while is_camera_stream_enabled(generation):
 
             ret, frame = cap.read()
 
@@ -2130,7 +2238,7 @@ def generate_camera_frames():
 
     finally:
         cap.release()
-        set_camera_stream_enabled(False)
+        finish_camera_stream(generation)
 
 
 # =========================
@@ -2138,14 +2246,12 @@ def generate_camera_frames():
 # =========================
 @app.post("/capture")
 async def capture_photo(request: Request):
-    current_captures = glob.glob(os.path.join(OUTPUT_DIR, "*.jpg"))
-
-    payload = {}
+    current_captures = get_capture_files()
 
     try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
+        payload = await read_bounded_json(request, MAX_UPLOAD_REQUEST_BYTES)
+    except ValueError as error:
+        return JSONResponse(status_code=400, content={"success": False, "message": str(error)})
 
     try:
         max_captures = int(payload.get("max_photo_count") or 6)
@@ -2165,12 +2271,17 @@ async def capture_photo(request: Request):
 
     data_base64 = payload.get("data_base64")
 
+    if camera_manager.selected != "webcam":
+        output_path = os.path.join(OUTPUT_DIR, f"capture_{uuid.uuid4().hex}.jpg")
+        try:
+            await run_in_threadpool(camera_manager.capture, output_path)
+        except CameraProviderError as error:
+            return JSONResponse(status_code=503, content={"success": False, "message": str(error)})
+        return {"success": True, "filename": os.path.basename(output_path), "image_url": public_url(output_path)}
+
     if data_base64:
         try:
-            if "," in data_base64:
-                data_base64 = data_base64.split(",", 1)[1]
-
-            image_bytes = base64.b64decode(data_base64)
+            image_bytes = await run_in_threadpool(decode_base64_image, data_base64)
         except (binascii.Error, ValueError):
             return JSONResponse(
                 status_code=400,
@@ -2183,8 +2294,7 @@ async def capture_photo(request: Request):
         filename = f"capture_{uuid.uuid4()}.jpg"
         output_path = os.path.join(OUTPUT_DIR, filename)
 
-        with open(output_path, "wb") as file:
-            file.write(image_bytes)
+        await run_in_threadpool(open_and_write, output_path, image_bytes)
 
         return {
             "success": True,
@@ -2192,7 +2302,7 @@ async def capture_photo(request: Request):
             "image_url": public_url(output_path)
         }
 
-    frame = get_frame_snapshot()
+    frame = await run_in_threadpool(get_frame_snapshot)
 
     if frame is None:
         return JSONResponse(
@@ -2207,7 +2317,7 @@ async def capture_photo(request: Request):
     output_path = os.path.join(OUTPUT_DIR, filename)
     frame = cv2.flip(frame, 1)
 
-    success = cv2.imwrite(
+    success = await run_in_threadpool(cv2.imwrite,
         output_path,
         frame,
         [int(cv2.IMWRITE_JPEG_QUALITY), 100]
@@ -2245,6 +2355,9 @@ def start_camera_stream():
 @app.post("/camera/stop")
 def stop_camera_stream():
     set_camera_stream_enabled(False)
+    with latest_frame_lock:
+        global latest_frame
+        latest_frame = None
 
     return {
         "success": True,
@@ -2265,6 +2378,13 @@ def get_camera_settings():
 async def set_camera_settings(request: Request):
     payload = await request.json()
 
+    if camera_manager.selected != "webcam":
+        try:
+            result = await run_in_threadpool(camera_manager.apply_settings, payload)
+            return {"success": True, "settings": result}
+        except CameraProviderError as error:
+            return JSONResponse(status_code=503, content={"success": False, "message": str(error)})
+
     with camera_props_lock:
         camera_props.clear()
         for key, value in payload.items():
@@ -2283,6 +2403,22 @@ async def set_camera_settings(request: Request):
 # =========================
 # CAMERA STREAM API
 # =========================
+@app.get("/camera/providers")
+def get_camera_providers():
+    return {"success": True, **camera_manager.status()}
+
+
+@app.post("/camera/provider")
+async def select_camera_provider(request: Request):
+    try:
+        payload = await read_bounded_json(request, 4096)
+        result = await run_in_threadpool(camera_manager.select, payload.get("provider"))
+        stop_camera_stream()
+        return {"success": True, **result}
+    except (ValueError, CameraProviderError) as error:
+        return JSONResponse(status_code=400, content={"success": False, "message": str(error)})
+
+
 @app.get("/camera-stream")
 def camera_stream():
 

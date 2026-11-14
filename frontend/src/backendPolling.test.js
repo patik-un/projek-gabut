@@ -347,6 +347,7 @@ test("all polling loaders ignore JSON bodies that arrive after cancellation", as
       backendReady: true,
       backendReadyRef: { current: true },
       watchSettingsRevisionRef: { current: 0 },
+      captureSessionRevisionRef: { current: 0 },
       stripSettingsRevisionRef: { current: 0 },
       watchFolderDraftRef: { current: null },
       driveFolderDraftRef: { current: null },
