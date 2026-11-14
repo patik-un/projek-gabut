@@ -13,6 +13,7 @@ const distPath = backendBinDir;
 const workPath = join(srcTauriDir, "target", "pyinstaller-build");
 const specPath = join(srcTauriDir, "target", "pyinstaller-spec");
 const isWindows = process.platform === "win32";
+const windowsPrintModules = ["pywintypes", "pythoncom", "win32api", "win32print", "win32gui", "win32ui", "win32con"];
 const outputBinary = join(
   backendBinDir,
   isWindows ? "event-booth-backend.exe" : "event-booth-backend",
@@ -29,6 +30,15 @@ if (!python) {
   throw new Error(
     "Python virtual environment tidak ditemukan. Jalankan setup backend sampai backend/.venv tersedia."
   );
+}
+
+if (isWindows) {
+  const preflight = spawnSync(python, ["-c", `import ${windowsPrintModules.join(", ")}; from PIL import ImageWin`], {
+    cwd: backendDir, stdio: "inherit",
+  });
+  if (preflight.status !== 0) {
+    throw new Error("Komponen printer Windows tidak lengkap di build environment. Install backend/requirements.txt sebelum membuat installer.");
+  }
 }
 
 mkdirSync(backendBinDir, { recursive: true });
@@ -64,6 +74,12 @@ const args = [
   specPath,
   join(backendDir, "main.py"),
 ];
+
+if (isWindows) {
+  // Imports made inside native .pyd extensions are invisible to Python analysis.
+  // Explicit shim imports also activate PyInstaller's pywintypes/pythoncom DLL hooks.
+  args.splice(args.length - 1, 0, ...windowsPrintModules.flatMap((name) => ["--hidden-import", name]));
+}
 
 console.log("🔨 Building bundled backend binary...");
 const result = spawnSync(python, args, {

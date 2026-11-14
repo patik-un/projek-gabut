@@ -1648,19 +1648,31 @@ def get_printers_unix():
     }
 
 
+def load_windows_print_runtime():
+    # Native pywin32 extensions import this shim from C; freezing cannot infer it.
+    import pywintypes
+    import win32print
+    import win32gui
+    import win32ui
+    import win32con
+    from PIL import ImageWin
+    return win32print, win32gui, win32ui, win32con, ImageWin
+
+
+def windows_print_runtime_error(error):
+    return JSONResponse(status_code=500, content={
+        'success': False,
+        'error_code': 'WINDOWS_PRINT_RUNTIME_MISSING',
+        'message': f'Komponen printer Windows bawaan gagal dimuat ({error}). Pasang ulang aplikasi dengan installer terbaru.',
+        'printers': [], 'default_printer': None,
+    })
+
+
 def get_printers_windows():
     try:
-        import win32print
-    except ImportError:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "message": "win32print tidak tersedia. Install pywin32.",
-                "printers": [],
-                "default_printer": None,
-            },
-        )
+        win32print, _, _, _, _ = load_windows_print_runtime()
+    except (ImportError, OSError) as error:
+        return windows_print_runtime_error(error)
 
     try:
         # PRINTER_ENUM_LOCAL (2) | PRINTER_ENUM_CONNECTIONS (4) = 6, Level 2
@@ -1802,19 +1814,9 @@ def print_file_unix(printer_name, print_file, paper_size="4r"):
 
 def print_file_windows(printer_name, print_file, paper_size="4r"):
     try:
-        import win32print
-        import win32gui
-        import win32ui
-        import win32con
-        from PIL import ImageWin
-    except ImportError:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "message": "pywin32 tidak tersedia. Install pywin32."
-            }
-        )
+        win32print, win32gui, win32ui, win32con, ImageWin = load_windows_print_runtime()
+    except (ImportError, OSError) as error:
+        return windows_print_runtime_error(error)
 
     printer = dc = None
     started = False

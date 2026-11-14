@@ -196,7 +196,7 @@ class AuditApiRegressionTest(unittest.IsolatedAsyncioTestCase):
         )
         dc = ui.CreateDCFromHandle.return_value
         dc.GetDeviceCaps.side_effect = [1200, 1800]
-        with patch.dict('sys.modules', {'win32print': printer, 'win32gui': gui, 'win32ui': ui, 'win32con': con}), \
+        with patch.dict('sys.modules', {'pywintypes': types.ModuleType('pywintypes'), 'win32print': printer, 'win32gui': gui, 'win32ui': ui, 'win32con': con}), \
              patch('PIL.ImageWin.Dib') as dib:
             self.assertIsNone(self.server.print_file_windows('Photo Printer', str(image_path), '3r'))
         printer.OpenPrinter.assert_called_once_with('Photo Printer')
@@ -205,6 +205,32 @@ class AuditApiRegressionTest(unittest.IsolatedAsyncioTestCase):
         gui.CreateDC.assert_called_once_with('WINSPOOL', 'Photo Printer', devmode)
         dib.return_value.draw.assert_called_once()
         dc.EndDoc.assert_called_once()
+
+    def test_printer_discovery_checks_native_runtime_before_reporting_printers(self):
+        printer = MagicMock()
+        printer.EnumPrinters.return_value = [{'pPrinterName': 'EPSON L3250 Series', 'Status': 0}]
+        printer.GetDefaultPrinter.return_value = 'EPSON L3250 Series'
+        # These represent native extensions whose C-level import requires pywintypes.
+        modules = {'pywintypes': None, 'win32print': printer, 'win32gui': MagicMock(),
+                   'win32ui': MagicMock(), 'win32con': MagicMock()}
+        with patch.dict('sys.modules', modules):
+            response = self.server.get_printers_windows()
+        self.assertEqual(getattr(response, 'status_code', None), 500)
+        body = json.loads(response.body)
+        self.assertEqual(body['error_code'], 'WINDOWS_PRINT_RUNTIME_MISSING')
+        self.assertIn('pywintypes', body['message'])
+
+    def test_windows_printer_discovery_returns_epson_when_runtime_is_available(self):
+        printer = MagicMock()
+        printer.EnumPrinters.return_value = [{'pPrinterName': 'EPSON L3250 Series', 'Status': 0}]
+        printer.GetDefaultPrinter.return_value = 'EPSON L3250 Series'
+        modules = {'pywintypes': types.ModuleType('pywintypes'), 'win32print': printer,
+                   'win32gui': MagicMock(), 'win32ui': MagicMock(), 'win32con': MagicMock()}
+        with patch.dict('sys.modules', modules):
+            result = self.server.get_printers_windows()
+        self.assertTrue(result['success'])
+        self.assertEqual(result['printers'][0]['name'], 'EPSON L3250 Series')
+        self.assertEqual(result['default_printer'], 'EPSON L3250 Series')
 
 
 class QueueAuditRegressionTest(unittest.TestCase):

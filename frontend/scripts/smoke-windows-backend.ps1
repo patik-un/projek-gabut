@@ -20,6 +20,9 @@ try {
     $headers = @{ 'x-event-booth-token' = $env:EVENT_BOOTH_API_TOKEN }
     $providers = Invoke-RestMethod 'http://127.0.0.1:18080/camera/providers' -Headers $headers -TimeoutSec 10
     if ($providers.selected -ne 'webcam') { throw 'Packaged backend default provider is invalid' }
+    $printers = Invoke-RestMethod 'http://127.0.0.1:18080/printers' -Headers $headers -TimeoutSec 20
+    if (-not $printers.success) { throw 'Packaged Windows printer runtime is unavailable' }
+    Write-Host 'Packaged Windows printer runtime and discovery passed (no print job submitted).'
     Write-Host 'Packaged Windows backend smoke test passed.'
 } finally {
     if ($process -and -not $process.HasExited) {
