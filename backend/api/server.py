@@ -1822,20 +1822,57 @@ def print_file_windows(printer_name, print_file, paper_size="4r"):
     started = False
     try:
         printer = win32print.OpenPrinter(printer_name)
-        devmode = win32print.GetPrinter(printer, 2)["pDevMode"]
+        printer_info = win32print.GetPrinter(printer, 2)
+        devmode = printer_info["pDevMode"]
         if devmode is None:
             raise ValueError("Driver printer tidak menyediakan pengaturan kertas")
-        devmode.PaperSize = 0
-        devmode.PaperWidth, devmode.PaperLength = (889, 1270) if paper_size == "3r" else (1016, 1524)
+        paper_width, paper_height = (889, 1270) if paper_size == "3r" else (1016, 1524)
+        # Prefer the driver's photo form: some drivers ignore custom dimensions
+        # while retaining their private A4 settings unless normalized below.
+        paper_id = 0
+        try:
+            port = printer_info.get("pPortName")
+            ids = win32print.DeviceCapabilities(printer_name, port, win32con.DC_PAPERS)
+            sizes = win32print.DeviceCapabilities(printer_name, port, win32con.DC_PAPERSIZE)
+            for candidate_id, size in zip(ids, sizes):
+                if abs(size["x"] - paper_width) <= 10 and abs(size["y"] - paper_height) <= 10:
+                    paper_id = candidate_id
+                    break
+        except Exception:
+            # Drivers without a form list can still accept custom paper sizes.
+            # The effective physical page is checked before any job is submitted.
+            pass
+        devmode.PaperSize = paper_id
+        devmode.PaperWidth, devmode.PaperLength = paper_width, paper_height
+        devmode.FormName = ""
+        devmode.Scale = 100
         devmode.Orientation = win32con.DMORIENT_PORTRAIT
-        devmode.Fields |= win32con.DM_PAPERSIZE | win32con.DM_PAPERWIDTH | win32con.DM_PAPERLENGTH | win32con.DM_ORIENTATION
+        devmode.Fields &= ~win32con.DM_FORMNAME
+        devmode.Fields |= win32con.DM_PAPERSIZE | win32con.DM_PAPERWIDTH | win32con.DM_PAPERLENGTH | win32con.DM_ORIENTATION | win32con.DM_SCALE
+        result = win32print.DocumentProperties(0, printer, printer_name, devmode, devmode,
+                                              win32con.DM_IN_BUFFER | win32con.DM_OUT_BUFFER)
+        if result < 0:
+            raise ValueError(f"Driver printer menolak ukuran {paper_size.upper()}")
         dc = win32ui.CreateDCFromHandle(win32gui.CreateDC("WINSPOOL", printer_name, devmode))
+        dpi_x = dc.GetDeviceCaps(win32con.LOGPIXELSX)
+        dpi_y = dc.GetDeviceCaps(win32con.LOGPIXELSY)
+        if dpi_x <= 0 or dpi_y <= 0:
+            raise ValueError("Resolusi printer tidak valid")
+        actual_width = dc.GetDeviceCaps(win32con.PHYSICALWIDTH) * 254 / dpi_x
+        actual_height = dc.GetDeviceCaps(win32con.PHYSICALHEIGHT) * 254 / dpi_y
+        scaled_by_driver = bool(devmode.Fields & win32con.DM_SCALE) and devmode.Scale != 100
+        if abs(actual_width - paper_width) > 30 or abs(actual_height - paper_height) > 30 or scaled_by_driver:
+            raise ValueError(f"Driver belum memakai ukuran {paper_size.upper()} ({paper_width / 10:g} × {paper_height / 10:g} mm). "
+                             "Pilih ukuran foto tersebut di Printing Preferences printer Windows, lalu coba lagi")
         width = dc.GetDeviceCaps(win32con.HORZRES)
         height = dc.GetDeviceCaps(win32con.VERTRES)
+        width = min(width, round(paper_width * dpi_x / 254))
+        height = min(height, round(paper_height * dpi_y / 254))
         with Image.open(print_file) as source:
             image = source.convert("RGB")
-            scale = min(width / image.width, height / image.height)
-            drawn_width, drawn_height = round(image.width * scale), round(image.height * scale)
+            # Fit in physical inches so asymmetric printer DPI cannot distort it.
+            scale = min(width / dpi_x / image.width, height / dpi_y / image.height)
+            drawn_width, drawn_height = round(image.width * scale * dpi_x), round(image.height * scale * dpi_y)
             left, top = (width - drawn_width) // 2, (height - drawn_height) // 2
             dc.StartDoc("Event Booth Studio")
             started = True

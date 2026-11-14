@@ -190,12 +190,16 @@ class AuditApiRegressionTest(unittest.IsolatedAsyncioTestCase):
         devmode = types.SimpleNamespace(Fields=0, PaperSize=0, PaperWidth=0, PaperLength=0, Orientation=0)
         printer = MagicMock()
         printer.GetPrinter.return_value = {'pDevMode': devmode}
+        printer.DeviceCapabilities.return_value = ()
+        printer.DocumentProperties.return_value = 1
         gui, ui, con = MagicMock(), MagicMock(), types.SimpleNamespace(
             DM_PAPERSIZE=2, DM_PAPERLENGTH=4, DM_PAPERWIDTH=8, DM_ORIENTATION=1,
-            DMORIENT_PORTRAIT=1, HORZRES=8, VERTRES=10,
+            DMORIENT_PORTRAIT=1, HORZRES=8, VERTRES=10, DM_FORMNAME=0x10000, DM_SCALE=16,
+            DM_IN_BUFFER=8, DM_OUT_BUFFER=2, DC_PAPERS=2, DC_PAPERSIZE=3,
+            LOGPIXELSX=88, LOGPIXELSY=90, PHYSICALWIDTH=110, PHYSICALHEIGHT=111,
         )
         dc = ui.CreateDCFromHandle.return_value
-        dc.GetDeviceCaps.side_effect = [1200, 1800]
+        dc.GetDeviceCaps.side_effect = {8: 1050, 10: 1500, 88: 300, 90: 300, 110: 1050, 111: 1500}.__getitem__
         with patch.dict('sys.modules', {'pywintypes': types.ModuleType('pywintypes'), 'win32print': printer, 'win32gui': gui, 'win32ui': ui, 'win32con': con}), \
              patch('PIL.ImageWin.Dib') as dib:
             self.assertIsNone(self.server.print_file_windows('Photo Printer', str(image_path), '3r'))
