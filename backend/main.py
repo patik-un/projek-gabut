@@ -6,6 +6,9 @@ import os
 import subprocess
 import atexit
 import uvicorn
+from runtime_logging import configure_console_output
+
+configure_console_output()
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 

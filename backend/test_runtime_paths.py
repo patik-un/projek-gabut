@@ -15,7 +15,7 @@ class BackendDataPathTest(unittest.TestCase):
 
     def test_configured_data_directory_overrides_the_module_location(self):
         with patch.dict(os.environ, {"EVENT_BOOTH_BACKEND_DATA_DIR": "~/booth-test-data"}):
-            self.assertEqual(get_backend_dir(__file__), os.path.expanduser("~/booth-test-data"))
+            self.assertEqual(get_backend_dir(__file__), os.path.abspath(os.path.expanduser("~/booth-test-data")))
 
 
 if __name__ == "__main__":

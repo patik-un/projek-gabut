@@ -4,6 +4,9 @@ import time
 import os
 import traceback
 import hashlib
+from runtime_logging import configure_console_output
+
+configure_console_output()
 
 from upload.upload_oauth import DriveUploadError, upload_to_drive
 from runtime_paths import get_backend_dir

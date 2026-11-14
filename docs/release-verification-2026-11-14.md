@@ -13,7 +13,7 @@
 ## Verifikasi lokal
 
 - 117 tes frontend lulus.
-- 119 tes backend lulus.
+- 121 tes backend lulus.
 - 2 tes Rust lulus.
 - Pemeriksaan versi rilis lulus: 0.1.2.
 - Build produksi frontend dan bundle Tauri macOS lengkap lulus.
@@ -21,6 +21,10 @@
 - Simulasi batasan Windows CreateProcess pada suite bridge kamera: 4 tes lulus.
 - Review kode independen menemukan error permanen Drive dan fixture kamera Windows; keduanya diperbaiki dan diperiksa dengan reproduksi gagal lalu lulus.
 - Scan pola kredensial pada 32 file kode tidak menemukan kredensial; file auth, token, binary dan data runtime tidak disertakan dalam commit.
+
+## Temuan runner Windows
+
+Build #9 mengungkap UnicodeEncodeError pada konsol CP1252 dan satu asumsi pemisah path pada tes. Backend kini mengonfigurasi stdout/stderr agar karakter yang tidak didukung di-escape, sehingga pencatatan tidak menggagalkan reset sesi atau antrean. Seluruh 121 tes backend lulus dengan PYTHONIOENCODING=cp1252 setelah perbaikan.
 
 ## Batas
 

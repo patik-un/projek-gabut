@@ -19,6 +19,10 @@ import secrets
 import atexit
 import asyncio
 import weakref
+from runtime_logging import configure_console_output
+
+configure_console_output()
+
 from PIL import Image, UnidentifiedImageError
 from camera.providers import CameraProviderManager, CameraProviderError
 from api.editor_catalog import normalize_editor_catalog
