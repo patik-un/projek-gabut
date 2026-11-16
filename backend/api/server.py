@@ -26,6 +26,7 @@ configure_console_output()
 from PIL import Image, UnidentifiedImageError
 from camera.providers import CameraProviderManager, CameraProviderError
 from api.editor_catalog import normalize_editor_catalog
+from api.booth_appearance import create_booth_appearance_router
 from api.sticker_processing import MAX_REQUEST_BYTES, SegmentationError, remove_background
 from api.gif_rendering import MAX_GIF_REQUEST_BYTES, MAX_UPLOAD_REQUEST_BYTES, render_gif, validate_gif_files
 from starlette.concurrency import run_in_threadpool
@@ -1397,6 +1398,9 @@ async def read_bounded_json(request, maximum):
     if not isinstance(payload, dict):
         raise ValueError("Permintaan harus berupa objek JSON")
     return payload
+
+
+app.include_router(create_booth_appearance_router(WATERMARK_DIR, read_bounded_json))
 
 
 @app.post("/photobooth/gif")

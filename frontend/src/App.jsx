@@ -19,6 +19,9 @@ import { useBoothClock } from './useBoothClock.js';
 import { useBoothFullscreen } from './useBoothFullscreen.js';
 import { AdminOperationsTabs, PrintOperationsSettings, TimingOperationsSettings } from './BoothOperationsSettings.jsx';
 import './BoothOperations.css';
+import BoothAppearanceSettings from './BoothAppearanceSettings.jsx';
+import { useBoothAppearance } from './useBoothAppearance.js';
+import { boothAppearanceStyle } from './boothAppearance.js';
 
 const API_URL = "http://127.0.0.1:8000";
 const DEFAULT_WATERMARK_SETTINGS = {
@@ -1044,6 +1047,7 @@ const hasMovedCarouselRef = useRef(false);
   const [isCleaningManualUploads, setIsCleaningManualUploads] = useState(false);
   const [isRetryingFailed, setIsRetryingFailed] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
+  const boothAppearance = useBoothAppearance(API_URL, backendReady);
   const [streamVersion, setStreamVersion] = useState(Date.now());
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraPreviewReady, setCameraPreviewReady] = useState(false);
@@ -1688,7 +1692,7 @@ const hasMovedCarouselRef = useRef(false);
     document.addEventListener('visibilitychange', update);
     return () => document.removeEventListener('visibilitychange', update);
   }, []);
-  const boothBusy = isCapturing || isFinalizingPhotobooth || isRenderingPhotoboothPreview || isPreparingPhotoboothGif || isPrintingStrip || isUploadingPhotoboothDrive || isUploading || isUploadingTemplate || isUploadingWatermark;
+  const boothBusy = boothAppearance.busy || isCapturing || isFinalizingPhotobooth || isRenderingPhotoboothPreview || isPreparingPhotoboothGif || isPrintingStrip || isUploadingPhotoboothDrive || isUploading || isUploadingTemplate || isUploadingWatermark;
   const boothTimer = useBoothClock({ mode: photoboothAdminSettings.mode, step: photoboothStep,
     timing: photoboothAdminSettings.timing, active: activeView === 'photobooth', busy: boothBusy });
   const sessionTimeExpired = boothTimer.clock?.expired === 'session';
@@ -6449,7 +6453,7 @@ const hasMovedCarouselRef = useRef(false);
     session: photoboothStep >= 3,
     capturing: isCapturing || isFinalizingPhotobooth || isPreparingPhotoboothGif,
     printing: isPrintingStrip,
-    saving: editorUpdateBusy || isUploading || isUploadingWatermark || isUploadingTemplate ||
+    saving: boothAppearance.busy || editorUpdateBusy || isUploading || isUploadingWatermark || isUploadingTemplate ||
       isUploadingPhotoboothDrive || isSavingWatchFolder || isRunningStartup || isVerifyingGoogleToken || isConnectingDrive,
   });
 
@@ -7033,8 +7037,12 @@ const hasMovedCarouselRef = useRef(false);
     return `${croppedWidth} x ${croppedHeight} px`;
   };
 
+  const themedBooth = activeView === "photobooth" && boothAppearance.appearance.theme !== "default";
   return (
-    <div className={`app${activeView === "photobooth" ? " booth-active" : ""}${boothFullscreen.fullscreen && activeView === "photobooth" ? " booth-fullscreen" : ""}`}>
+    <div className={`app${activeView === "photobooth" ? " booth-active" : ""}${boothFullscreen.fullscreen && activeView === "photobooth" ? " booth-fullscreen" : ""}${themedBooth ? " booth-themed" : ""}`}
+      data-booth-theme={themedBooth ? boothAppearance.appearance.theme : undefined}
+      style={themedBooth ? boothAppearanceStyle(boothAppearance.appearance, API_URL) : undefined}>
+      {themedBooth && <div className="booth-backdrop" aria-hidden="true"><div className="booth-backdrop-dim" /></div>}
       <header className="topbar" inert={sessionTimeExpired || isRenderingPhotoboothPreview}>
         <div className="app-brand">
           <img src={sisikitaCompanyLogo} alt="Sisikita Creative" />
@@ -9830,6 +9838,9 @@ onPointerMove={onEditCropPointerMove}
             <section className="admin-grid admin-operations-grid" ref={adminGridRef}>
               <div hidden={adminTab !== 'timing'} style={{gridColumn: '1 / -1'}}>
                 <TimingOperationsSettings settings={photoboothAdminSettings} onChange={setPhotoboothAdminSettings} />
+              </div>
+              <div hidden={adminTab !== 'photobooth'} className="booth-appearance-slot">
+                <BoothAppearanceSettings apiUrl={API_URL} backendReady={backendReady} appearanceState={boothAppearance} />
               </div>
               <div className="admin-column admin-column-left">
 
