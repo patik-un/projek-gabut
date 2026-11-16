@@ -9,6 +9,7 @@ import { createTextArtwork, createStickerArtwork, decorationStyle } from "./deco
 import DecorationArtwork from "./DecorationArtwork.jsx";
 import StickerTransformControls from "./StickerTransformControls.jsx";
 import PhotoboothGifResults from "./PhotoboothGifResults.jsx";
+import PhotoboothQrCode from "./PhotoboothQrCode.jsx";
 import { animatedStripOverlays, photoGifFrames, requestGifAssets } from "./photoboothGif.js";
 import sisikitaCompanyLogo from "./assets/sisikita-company-logo.png";
 import "./App.css";
@@ -22,6 +23,7 @@ import './BoothOperations.css';
 import BoothAppearanceSettings from './BoothAppearanceSettings.jsx';
 import { useBoothAppearance } from './useBoothAppearance.js';
 import { boothAppearanceStyle } from './boothAppearance.js';
+import './PhotoboothDelivery.css';
 
 const API_URL = "http://127.0.0.1:8000";
 const DEFAULT_WATERMARK_SETTINGS = {
@@ -837,10 +839,6 @@ const loadPhotoboothStripCache = () => {
   }
   return { strip_options: PHOTOBOOTH_SLOT_COUNTS.map(createEmptyPhotoboothTemplate), pending_sync: false };
 };
-const createQrCodeUrl = (value) =>
-  value
-    ? `https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=12&data=${encodeURIComponent(value)}`
-    : null;
 const normalizeCompressionQuality = (value) => {
   const quality = Number(value);
 
@@ -4667,9 +4665,6 @@ const hasMovedCarouselRef = useRef(false);
     }
     photoboothCompositionKeyRef.current = photoboothCompositionKey;
   }, [photoboothCompositionKey]);
-  const photoboothDriveQrUrl = createQrCodeUrl(
-    photoboothDriveResult?.folder_url
-  );
   const currentWatermarkSettings =
     watermarkSettings[watermarkOrientation] || DEFAULT_WATERMARK_PROFILES[watermarkOrientation];
   const previewWatermarkSettings =
@@ -8200,7 +8195,7 @@ const hasMovedCarouselRef = useRef(false);
                 <section className="photobooth-drive-card">
                   <div className="template-panel-header">
                     <div>
-                      <h2>Upload ke Google Drive</h2>
+                      <h2>Ambil Foto Digital</h2>
                       <span>{photoboothDriveResult?.queued ? "Tersimpan lokal; menunggu pengiriman Drive otomatis." : photoboothDriveResult ? "Folder siap; hasil masuk antrean pengiriman." : "Strip JPG untuk cetak; GIF digital disertakan ke folder hasil."}</span>
                     </div>
                   </div>
@@ -8220,15 +8215,7 @@ const hasMovedCarouselRef = useRef(false);
                           </a>
                         )}
                       </div>
-                      {photoboothDriveQrUrl && (
-                        <div className="drive-qr-card">
-                          <img
-                            src={photoboothDriveQrUrl}
-                            alt="QR link Google Drive"
-                          />
-                          <span>Scan untuk buka folder</span>
-                        </div>
-                      )}
+                      <PhotoboothQrCode value={photoboothDriveResult.folder_url} />
                     </div>
                   ) : (
                     <span className="upload-status-text">
