@@ -1,3 +1,4 @@
+import { normalizeCaptureReview } from './captureReview.js';
 import { normalizeBoothOperations } from './boothOperations.js';
 
 export const ADMIN_TABS = [['photobooth', 'Photobooth'], ['strip', 'Strip'], ['camera', 'Kamera'], ['print', 'Cetak'], ['timing', 'Waktu'], ['system', 'Sistem']];
@@ -29,6 +30,9 @@ export function PrintOperationsSettings({ settings, onChange, onTest, disabled, 
   </div>;
 }
 export function TimingOperationsSettings({ settings, onChange }) {
+  const review = normalizeCaptureReview(settings.captureReview);
+  const updateReview = patch => onChange(current => ({ ...current,
+    captureReview: normalizeCaptureReview({ ...normalizeCaptureReview(current.captureReview), ...patch }) }));
   const fields = [['initialCountdown', 'Hitungan mundur foto pertama', 1, 30], ['nextCountdown', 'Hitungan mundur foto berikutnya', 1, 30],
     ['sessionSeconds', 'Batas sesi foto dan edit', 0, 3600], ['selectionSeconds', 'Waktu memilih strip', 0, 600], ['editSeconds', 'Waktu mengedit foto', 0, 600]];
   return <section className="admin-card booth-timing-card">
@@ -38,6 +42,20 @@ export function TimingOperationsSettings({ settings, onChange }) {
         const value = Math.round(Math.max(min, Math.min(max, Number(e.target.value) || min)));
         onChange(current => ({ ...current, timing: { ...current.timing, [key]: value } }));
       }} /></label>)}</div>
+    <h3>Pratinjau dan Ulang Foto</h3>
+    <div className="booth-settings-fields">
+      <label>Tampilkan hasil setelah setiap foto<select value={String(review.enabled)} onChange={e => updateReview({ enabled: e.target.value === 'true' })}>
+        <option value="true">Aktif</option><option value="false">Nonaktif</option>
+      </select></label>
+      <label>Durasi pratinjau (detik)<input type="number" min="2" max="30" step="1" value={review.seconds} disabled={!review.enabled}
+        onChange={e => updateReview({ seconds: Math.max(2, Math.min(30, Math.round(Number(e.target.value) || 2))) })} /></label>
+      <label>Izinkan ulang foto<select value={String(review.allowRetake)} disabled={!review.enabled} onChange={e => updateReview({ allowRetake: e.target.value === 'true' })}>
+        <option value="true">Ya</option><option value="false">Tidak</option>
+      </select></label>
+      <label>Batas ulang per foto<input type="number" min="1" max="5" step="1" value={review.maxRetakes} disabled={!review.enabled || !review.allowRetake}
+        onChange={e => updateReview({ maxRetakes: Math.max(1, Math.min(5, Math.round(Number(e.target.value) || 1))) })} /></label>
+    </div>
+    <p className="booth-setting-help">Saat pratinjau habis, foto otomatis dipakai. Foto lama tetap aman bila pengambilan ulang gagal. Berlaku mulai sesi berikutnya.</p>
     <ul className="booth-setting-help"><li>Waktu pilih strip habis: mulai dengan strip terpilih ketika sistem siap.</li>
       <li>Waktu edit habis: lanjut ke halaman hasil; cetak dan simpan tetap memerlukan tindakan pengguna.</li>
       <li>Batas sesi habis: sesi dijeda dan foto tetap tersedia sampai sesi dilanjutkan atau diakhiri.</li>

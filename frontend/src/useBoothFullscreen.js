@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { setBoothFullscreen } from './boothFullscreen.js';
+import { setBoothFullscreen, handleBoothFullscreenKey } from './boothFullscreen.js';
 
-export function useBoothFullscreen() {
+export function useBoothFullscreen(active = true) {
   const [fullscreen, setFullscreen] = useState(false);
   const [error, setError] = useState('');
   const changing = useRef(false);
@@ -26,13 +26,13 @@ export function useBoothFullscreen() {
         if (!stopped) setFullscreen(value);
       } catch { /* The action handler displays actionable errors. */ }
     };
-    const escape = e => { if (e.key === 'Escape' && nativeWindow.current) void change(false); };
+    const escape = e => handleBoothFullscreenKey(e, active, change);
     document.addEventListener('fullscreenchange', sync);
     window.addEventListener('keydown', escape);
     if (nativeWindow.current) nativeWindow.current.onResized(sync).then(stop => { if (stopped) stop(); else unlisten = stop; })
-      .catch(() => { if (!stopped) setError('Tidak dapat memantau fullscreen. Gunakan tombol keluar atau Esc.'); });
+      .catch(() => { if (!stopped) setError('Tidak dapat memantau fullscreen. Tekan Esc untuk keluar.'); });
     void sync();
     return () => { stopped = true; unlisten?.(); document.removeEventListener('fullscreenchange', sync); window.removeEventListener('keydown', escape); };
-  }, [change]);
+  }, [active, change]);
   return { fullscreen, error, change };
 }

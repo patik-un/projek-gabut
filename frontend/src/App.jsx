@@ -17,6 +17,7 @@ import AppUpdates from './AppUpdates.jsx';
 import { updateBusyReason } from './appUpdater.js';
 import { normalizeBoothOperations, formatBoothTime, createPrintTestImage } from './boothOperations.js';
 import { useBoothClock } from './useBoothClock.js';
+import { normalizeCaptureReview, advanceCaptureReview } from './captureReview.js';
 import { useBoothFullscreen } from './useBoothFullscreen.js';
 import { AdminOperationsTabs, PrintOperationsSettings, TimingOperationsSettings } from './BoothOperationsSettings.jsx';
 import './BoothOperations.css';
@@ -416,7 +417,6 @@ const PHOTOBOOTH_INITIAL_CAPTURE_DELAY = 3;
 const PHOTOBOOTH_NEXT_CAPTURE_DELAY = 3;
 const PHOTOBOOTH_INITIAL_READY_MS = 1500;
 const PHOTOBOOTH_NEXT_READY_MS = 1500;
-const PHOTOBOOTH_FINAL_PREVIEW_MS = 1800;
 const PHOTOBOOTH_ADMIN_SETTINGS_KEY = "photobooth_admin_settings";
 const PHOTOBOOTH_STRIP_SETTINGS_KEY = "photobooth_strip_settings";
 const PHOTOBOOTH_SLOT_COUNTS = [1, 2, 3];
@@ -648,6 +648,7 @@ const buildCompressEditPreviewFilter = (adjustments, effectId) => {
 };
 const DEFAULT_PHOTOBOOTH_ADMIN_SETTINGS = {
   ...normalizeBoothOperations(),
+  captureReview: normalizeCaptureReview(),
   stripPhotoCount: 1,
   defaultStripId: "photobooth-strip-1",
   stripSettings: {},
@@ -887,6 +888,7 @@ const loadPhotoboothAdminSettings = () => {
 
     return {
       ...normalizeBoothOperations(parsed),
+      captureReview: normalizeCaptureReview(parsed.captureReview),
       stripPhotoCount: Number.isInteger(stripPhotoCount) && stripPhotoCount >= 1 && stripPhotoCount <= 10
         ? stripPhotoCount
         : 1,
@@ -1027,7 +1029,7 @@ const hasMovedCarouselRef = useRef(false);
   const [activeView, setActiveView] = useState("photobooth");
   const [adminTab, setAdminTab] = useState("photobooth");
   useEffect(() => { adminGridRef.current?.scrollTo({ top: 0 }); }, [adminTab]);
-  const boothFullscreen = useBoothFullscreen();
+  const boothFullscreen = useBoothFullscreen(activeView === "photobooth");
   const [editorCatalog, setEditorCatalog] = useState(null);
   const [editorCatalogError, setEditorCatalogError] = useState("");
   const [editorCatalogReload, setEditorCatalogReload] = useState(0);
@@ -1039,6 +1041,11 @@ const hasMovedCarouselRef = useRef(false);
   const [autoCaptureLabel, setAutoCaptureLabel] = useState("");
   const [autoCaptureReady, setAutoCaptureReady] = useState(false);
   const [showResult, setShowResult] = useState(false);
+  const [captureReviewSettings, setCaptureReviewSettings] = useState(() => normalizeCaptureReview());
+  const [captureReviewRemaining, setCaptureReviewRemaining] = useState(0);
+  const [captureReviewAttempts, setCaptureReviewAttempts] = useState(0);
+  const [retakeTarget, setRetakeTarget] = useState(null);
+  const captureInFlightRef = useRef(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isUploadingWatermark, setIsUploadingWatermark] = useState(false);
   const [isClearingQueue, setIsClearingQueue] = useState(false);
@@ -2981,6 +2988,9 @@ const hasMovedCarouselRef = useRef(false);
     setAutoCaptureLabel("");
     setAutoCaptureReady(false);
     setShowResult(false);
+    setRetakeTarget(null);
+    setCaptureReviewAttempts(0);
+    setCaptureReviewRemaining(0);
     setPhotoboothEditMode("photo");
     setSelectedEditPhotoIndex(0);
     setDraftPhotoEffect("natural");
@@ -3047,6 +3057,10 @@ const hasMovedCarouselRef = useRef(false);
       captureSessionRevisionRef.current += 1;
       setCaptures([]);
       setShowResult(false);
+      setCaptureReviewSettings(normalizeCaptureReview(photoboothAdminSettings.captureReview));
+      setRetakeTarget(null);
+      setCaptureReviewAttempts(0);
+      setCaptureReviewRemaining(0);
 
       const sessionTemplate =
         photoboothStripOptions.find(
@@ -3140,26 +3154,29 @@ const hasMovedCarouselRef = useRef(false);
 
   const handleCapture = async ({ automatic = false } = {}) => {
     if (!pageVisible || document.hidden || sessionTimeExpired) return false;
-    if (isCapturing || !backendReady) {
+    if (isCapturing || captureInFlightRef.current || !backendReady) {
       setStatus("Kamera belum siap");
       return false;
     }
 
-    if (captures.length >= photoboothCaptureCount) {
+    if (!retakeTarget && captures.length >= photoboothCaptureCount) {
       setStatus(`Sesi ini sudah berisi ${photoboothCaptureCount} foto`);
       return false;
     }
 
     clearAutoCaptureTimers();
+    captureInFlightRef.current = true;
+    const sessionRevision = captureSessionRevisionRef.current;
     setIsCapturing(true);
     setAutoCaptureCountdown(null);
     setAutoCaptureLabel("Mengambil...");
-    setStatus(automatic ? `Mengambil Foto ${captures.length + 1} otomatis...` : "Mengambil foto...");
+    setStatus(retakeTarget ? `Mengulang Foto ${captures.length}...` : automatic ? `Mengambil Foto ${captures.length + 1} otomatis...` : "Mengambil foto...");
 
     try {
       const cameraFrame = cameraProvider === "webcam" ? captureBrowserCameraFrame() : null;
       const capturePayload = {
         max_photo_count: photoboothCaptureCount,
+        ...(retakeTarget ? { replace_filename: retakeTarget } : {}),
         ...(cameraFrame ? { data_base64: cameraFrame } : {}),
       };
       const response = await fetch(`${API_URL}/capture`, {
@@ -3175,11 +3192,17 @@ const hasMovedCarouselRef = useRef(false);
         throw new Error(data.message || "Gagal mengambil foto");
       }
 
-      setStatus(`Foto ${captures.length + 1} tersimpan`);
-      const nextCaptureCount = captures.length + 1;
+      if (sessionRevision !== captureSessionRevisionRef.current) return false;
+      setStatus(retakeTarget ? 'Foto ulang tersimpan' : `Foto ${captures.length + 1} tersimpan`);
+      const nextCaptureCount = captures.length + (retakeTarget ? 0 : 1);
+      setStreamVersion(Date.now());
+      setCaptureReviewAttempts(count => retakeTarget ? count + 1 : 0);
+      setRetakeTarget(null);
       await loadCaptures();
       await loadPhotoQueue();
-      setShowResult(true);
+      if (sessionRevision !== captureSessionRevisionRef.current) return false;
+      setCaptureReviewRemaining(captureReviewSettings.seconds * 1000);
+      setShowResult(captureReviewSettings.enabled);
 
       if (nextCaptureCount >= photoboothCaptureCount) {
         clearAutoCaptureTimers();
@@ -3188,19 +3211,60 @@ const hasMovedCarouselRef = useRef(false);
         setSlotPhotoMap(createEmptyStripMap(photoboothPhotoCount, photoboothPhotoCount));
         setPhotoboothEditMode("strip");
         setStatus(`${photoboothCaptureCount} foto selesai, menyiapkan hasil...`);
-      } else {
-        window.setTimeout(() => setShowResult(false), 1800);
       }
 
       return true;
     } catch (error) {
+      if (sessionRevision !== captureSessionRevisionRef.current) return false;
+      if (retakeTarget) {
+        setRetakeTarget(null);
+        setCaptureReviewRemaining(captureReviewSettings.seconds * 1000);
+        setShowResult(true);
+      }
       setStatus(error.message || "Gagal mengambil foto");
       return false;
     } finally {
+      captureInFlightRef.current = false;
       setIsCapturing(false);
       window.setTimeout(() => setStatus(""), 2500);
     }
   };
+
+  const acceptCaptureReview = () => {
+    if (isCapturing || captureInFlightRef.current) return;
+    setShowResult(false);
+    setRetakeTarget(null);
+    setCaptureReviewRemaining(0);
+    setCaptureReviewAttempts(0);
+  };
+
+  const retakeCaptureReview = () => {
+    if (!showResult || isCapturing || captureInFlightRef.current || !pageVisible || sessionTimeExpired ||
+        !captureReviewSettings.allowRetake || captureReviewAttempts >= captureReviewSettings.maxRetakes || !captures[0]) return;
+    clearAutoCaptureTimers();
+    setRetakeTarget(captures[0].filename);
+    setShowResult(false);
+    setCaptureReviewRemaining(0);
+  };
+
+  useEffect(() => {
+    const captureStep = photoboothAdminSettings.mode === 'admin' ? 2 : 3;
+    if (!showResult || activeView !== 'photobooth' || photoboothStep !== captureStep ||
+        !pageVisible || sessionTimeExpired || boothBusy) return undefined;
+    if (captureReviewRemaining <= 0) {
+      acceptCaptureReview();
+      return undefined;
+    }
+    let last = performance.now();
+    const timer = window.setInterval(() => {
+      const now = performance.now();
+      const elapsed = now - last;
+      last = now;
+      setCaptureReviewRemaining(remaining => advanceCaptureReview(remaining, elapsed, document.hidden));
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [showResult, activeView, photoboothStep, photoboothAdminSettings.mode, pageVisible,
+    sessionTimeExpired, boothBusy, captureReviewRemaining <= 0]);
 
   useEffect(() => {
     if (activeView !== "photobooth" || photoboothStep !== 2) {
@@ -3263,11 +3327,20 @@ const hasMovedCarouselRef = useRef(false);
       setAutoCaptureCountdown(null);
       setAutoCaptureLabel("");
       setAutoCaptureReady(false);
-      setShowResult(false);
+      if (photoboothStep !== captureStepNum) {
+        setShowResult(false);
+        setRetakeTarget(null);
+        setCaptureReviewRemaining(0);
+      }
       return undefined;
     }
 
-    if (captures.length >= photoboothCaptureCount) {
+    if (!pageVisible || sessionTimeExpired || showResult || isCapturing) {
+      clearAutoCaptureTimers();
+      return undefined;
+    }
+
+    if (!retakeTarget && captures.length >= photoboothCaptureCount) {
       clearAutoCaptureTimers();
       setAutoCaptureCountdown(null);
       setAutoCaptureLabel("Selesai");
@@ -3290,7 +3363,7 @@ const hasMovedCarouselRef = useRef(false);
           setPhotoboothStep(4);
           setStatus(`${photoboothCaptureCount} foto selesai, strip siap dikirim atau dicetak`);
         }
-      }, PHOTOBOOTH_FINAL_PREVIEW_MS);
+      }, 0);
 
       return () => window.clearTimeout(nextStepTimer);
     }
@@ -3367,6 +3440,7 @@ const hasMovedCarouselRef = useRef(false);
     showResult,
     sessionTimeExpired,
     pageVisible,
+    retakeTarget,
     sessionTiming.initialCountdown,
     sessionTiming.nextCountdown,
   ]);
@@ -7177,15 +7251,13 @@ const hasMovedCarouselRef = useRef(false);
         </div>
       </header>
 
-      {activeView === 'photobooth' && <div className="booth-mode-tools">
+      {activeView === 'photobooth' && (boothFullscreen.error || boothTimer.clock?.stageRemaining != null ||
+        (boothTimer.clock?.sessionRemaining != null && ['capture', 'editing'].includes(boothTimer.clock.stage))) && <div className="booth-mode-tools">
         {boothTimer.clock?.stageRemaining !== null && boothTimer.clock?.stageRemaining !== undefined &&
           <span className="booth-clock">{boothTimer.clock.stage === 'selection' ? 'Pilih strip' : 'Edit foto'}: {formatBoothTime(boothTimer.clock.stageRemaining)}</span>}
         {boothTimer.clock?.sessionRemaining !== null && boothTimer.clock?.sessionRemaining !== undefined && ['capture','editing'].includes(boothTimer.clock.stage) &&
           <span className="booth-clock">Sisa sesi: {formatBoothTime(boothTimer.clock.sessionRemaining)}</span>}
         {boothFullscreen.error && <span role="alert">{boothFullscreen.error}</span>}
-        <button type="button" onClick={() => boothFullscreen.change(!boothFullscreen.fullscreen)}>
-          {boothFullscreen.fullscreen ? 'Keluar fullscreen (Esc)' : 'Fullscreen Photobooth'}
-        </button>
       </div>}
       {activeView === 'photobooth' && sessionTimeExpired && <div className="booth-time-shade">
         <section className="booth-time-dialog" role="dialog" aria-modal="true" aria-labelledby="booth-time-title">
@@ -7435,7 +7507,11 @@ const hasMovedCarouselRef = useRef(false);
                   <div className="capture-strip-header">
                     <div className="capture-session-copy">
                       <strong>
-                        {captures.length >= photoboothCaptureCount
+                        {showResult
+                          ? `Hasil Foto ${captures.length}`
+                          : retakeTarget
+                            ? `Ulang Foto ${captures.length}`
+                            : captures.length >= photoboothCaptureCount
                           ? "Semua foto selesai"
                           : `Foto ${captures.length + 1}`}
                       </strong>
@@ -7587,7 +7663,7 @@ const hasMovedCarouselRef = useRef(false);
                           )}
                         </>
                       )}
-                      {!showResult && captures.length < photoboothCaptureCount && (
+                      {!showResult && (retakeTarget || captures.length < photoboothCaptureCount) && (
                         <div className="capture-center-status">
                           {autoCaptureReady ? (
                             <div className="slot-countdown-overlay ready-overlay">
@@ -7605,6 +7681,13 @@ const hasMovedCarouselRef = useRef(false);
                   </div>
                 </div>
 
+                {showResult && <div className="capture-review-actions" role="group" aria-label="Periksa hasil foto">
+                  <span>Foto {captures.length} · lanjut dalam {Math.ceil(captureReviewRemaining / 1000)} detik</span>
+                  <button type="button" className="upload-button compact" disabled={isCapturing} onClick={acceptCaptureReview}>Pakai Foto</button>
+                  {captureReviewSettings.allowRetake && <button type="button" className="secondary-button compact"
+                    disabled={isCapturing || captureReviewAttempts >= captureReviewSettings.maxRetakes} onClick={retakeCaptureReview}>
+                    Ulang Foto ({Math.max(0, captureReviewSettings.maxRetakes - captureReviewAttempts)} tersisa)</button>}
+                </div>}
                 <div className="step-footer">
                   <div>
                     <strong>{captures.length}</strong>
@@ -7618,7 +7701,7 @@ const hasMovedCarouselRef = useRef(false);
                     >
                       Kembali
                     </button>
-                    {!isOtoMode && photoboothAdminSettings.mode === "admin" && captures.length < photoboothCaptureCount && (
+                    {!isOtoMode && photoboothAdminSettings.mode === "admin" && !showResult && (retakeTarget || captures.length < photoboothCaptureCount) && (
                       <button
                         type="button"
                         className="upload-button compact"
@@ -7644,7 +7727,7 @@ const hasMovedCarouselRef = useRef(false);
                               : 4
                         );
                       }}
-                      disabled={captures.length < photoboothCaptureCount}
+                      disabled={showResult || Boolean(retakeTarget) || isCapturing || captures.length < photoboothCaptureCount}
                     >
                       {isOtoMode && !photoboothAdminSettings.editEnabled
                         ? "Lanjut Hasil ➔"

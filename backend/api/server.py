@@ -1,3 +1,4 @@
+import tempfile
 import sqlite3
 import os
 import glob
@@ -2396,7 +2397,30 @@ async def capture_photo(request: Request):
 
     max_captures = min(PHOTOBOOTH_TEMPLATE_MAX_SLOTS * 2, max(1, max_captures))
 
-    if len(current_captures) >= max_captures:
+    replacement_path = None
+    if "replace_filename" in payload:
+        target = payload["replace_filename"]
+        if not isinstance(target, str) or not target or "/" in target or "\\" in target:
+            return JSONResponse(status_code=400, content={"success": False, "message": "Target ulang foto tidak valid"})
+        if not current_captures or os.path.basename(current_captures[0]) != target:
+            return JSONResponse(status_code=409, content={"success": False, "message": "Hanya foto terakhir pada sesi ini yang dapat diulang"})
+        replacement_path = current_captures[0]
+
+    def complete_capture(output_path):
+        if replacement_path:
+            try:
+                # The old JPEG remains intact until a complete replacement exists.
+                os.replace(output_path, replacement_path)
+            except OSError:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+                return JSONResponse(status_code=503, content={"success": False, "message": "Foto lama masih digunakan. Hasil sebelumnya tetap aman; silakan ulangi."})
+            output_path = replacement_path
+        return {"success": True, "filename": os.path.basename(output_path), "image_url": public_url(output_path)}
+
+    if not replacement_path and len(current_captures) >= max_captures:
         return JSONResponse(
             status_code=409,
             content={
@@ -2405,74 +2429,73 @@ async def capture_photo(request: Request):
             }
         )
 
-    data_base64 = payload.get("data_base64")
+    # Keep unfinished retakes outside the session's *.jpg enumeration.
+    staging_dir = tempfile.mkdtemp(prefix=".retake-", dir=OUTPUT_DIR) if replacement_path else None
+    capture_dir = staging_dir or OUTPUT_DIR
+    try:
+        data_base64 = payload.get("data_base64")
 
-    if camera_manager.selected != "webcam":
-        output_path = os.path.join(OUTPUT_DIR, f"capture_{uuid.uuid4().hex}.jpg")
-        try:
-            await run_in_threadpool(camera_manager.capture, output_path)
-        except CameraProviderError as error:
-            return JSONResponse(status_code=503, content={"success": False, "message": str(error)})
-        return {"success": True, "filename": os.path.basename(output_path), "image_url": public_url(output_path)}
+        if camera_manager.selected != "webcam":
+            output_path = os.path.join(capture_dir, f"capture_{uuid.uuid4().hex}.jpg")
+            try:
+                await run_in_threadpool(camera_manager.capture, output_path)
+            except CameraProviderError as error:
+                return JSONResponse(status_code=503, content={"success": False, "message": str(error)})
+            return complete_capture(output_path)
 
-    if data_base64:
-        try:
-            image_bytes = await run_in_threadpool(decode_base64_image, data_base64)
-        except (binascii.Error, ValueError):
+        if data_base64:
+            try:
+                image_bytes = await run_in_threadpool(decode_base64_image, data_base64)
+            except (binascii.Error, ValueError):
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "success": False,
+                        "message": "Data foto dari kamera tidak valid"
+                    }
+                )
+
+            filename = f"capture_{uuid.uuid4()}.jpg"
+            output_path = os.path.join(capture_dir, filename)
+
+            await run_in_threadpool(open_and_write, output_path, image_bytes)
+
+            return complete_capture(output_path)
+
+        frame = await run_in_threadpool(get_frame_snapshot)
+
+        if frame is None:
             return JSONResponse(
-                status_code=400,
+                status_code=503,
                 content={
                     "success": False,
-                    "message": "Data foto dari kamera tidak valid"
+                    "message": "Camera frame belum tersedia"
                 }
             )
 
         filename = f"capture_{uuid.uuid4()}.jpg"
-        output_path = os.path.join(OUTPUT_DIR, filename)
+        output_path = os.path.join(capture_dir, filename)
+        frame = cv2.flip(frame, 1)
 
-        await run_in_threadpool(open_and_write, output_path, image_bytes)
-
-        return {
-            "success": True,
-            "filename": filename,
-            "image_url": public_url(output_path)
-        }
-
-    frame = await run_in_threadpool(get_frame_snapshot)
-
-    if frame is None:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "success": False,
-                "message": "Camera frame belum tersedia"
-            }
+        success = await run_in_threadpool(cv2.imwrite,
+            output_path,
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), 100]
         )
 
-    filename = f"capture_{uuid.uuid4()}.jpg"
-    output_path = os.path.join(OUTPUT_DIR, filename)
-    frame = cv2.flip(frame, 1)
+        if not success:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "success": False,
+                    "message": "Gagal menyimpan foto"
+                }
+            )
 
-    success = await run_in_threadpool(cv2.imwrite,
-        output_path,
-        frame,
-        [int(cv2.IMWRITE_JPEG_QUALITY), 100]
-    )
-
-    if not success:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "message": "Gagal menyimpan foto"
-            }
-        )
-
-    return {
-        "success": True,
-        "filename": filename,
-        "image_url": public_url(output_path)
-    }
+        return complete_capture(output_path)
+    finally:
+        if staging_dir:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 # =========================

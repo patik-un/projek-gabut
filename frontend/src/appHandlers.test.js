@@ -6,6 +6,7 @@ import vm from "node:vm";
 import { requestBackendJson } from "./backendRequest.js";
 import { resolveEditorText, resolveEditorTextItem } from "./photoboothEditor.js";
 import { decorationStyle } from "./decorationArtwork.js";
+import { normalizeCaptureReview, advanceCaptureReview } from './captureReview.js';
 import { normalizeBoothOperations } from './boothOperations.js';
 
 const require = createRequire(import.meta.url);
@@ -22,6 +23,15 @@ function appHandler(name, context) {
     .find((node) => node.id.name === name);
   assert.ok(declaration, `App callback ${name} exists`);
   context.normalizeBoothOperations ??= normalizeBoothOperations;
+  context.normalizeCaptureReview ??= normalizeCaptureReview;
+  context.captureReviewSettings ??= normalizeCaptureReview();
+  context.retakeTarget ??= null;
+  context.captureInFlightRef ??= { current: false };
+  context.captureSessionRevisionRef ??= { current: 0 };
+  context.setStreamVersion ??= () => {};
+  context.setCaptureReviewAttempts ??= () => {};
+  context.setCaptureReviewRemaining ??= () => {};
+  context.setRetakeTarget ??= () => {};
   context.pageVisible ??= true;
   context.document ??= { hidden: false };
   context.sessionTimeExpired ??= false;
@@ -29,6 +39,7 @@ function appHandler(name, context) {
 }
 
 function globalValue(name, context = {}) {
+  context.normalizeCaptureReview ??= normalizeCaptureReview;
   const declaration = parse(source, { sourceType: "module", plugins: ["jsx"] }).program.body
     .filter((node) => node.type === "VariableDeclaration")
     .flatMap((node) => node.declarations).find((node) => node.id.name === name);
@@ -828,5 +839,122 @@ test("camera white balance uses a valid default for missing or corrupt saved set
       window: { localStorage: { getItem: () => stored } },
     });
     assert.equal(initialize(), expected, `stored white balance: ${stored}`);
+  }
+});
+
+test('retaking at the photo limit replaces the latest photo without adding a slot', async () => {
+  const context = sessionContext();
+  Object.assign(context, { captures: [{ filename: 'latest.jpg' }], photoboothCaptureCount: 1,
+    isCapturing: false, retakeTarget: 'latest.jpg', captureReviewSettings: { enabled: true, seconds: 5 },
+    cameraProvider: 'webcam', captureBrowserCameraFrame: () => 'frame', captureInFlightRef: { current: false },
+    captureReviewAttempts: 0, captureReviewRemaining: 0,
+  });
+  let payload;
+  context.fetch = async (_url, options) => { payload = JSON.parse(options.body); return { ok: true, json: async () => ({ success: true }) }; };
+  assert.equal(await appHandler('handleCapture', context)(), true);
+  assert.equal(payload.replace_filename, 'latest.jpg');
+  assert.equal(context.captureReviewAttempts, 1);
+  assert.equal(context.showResult, true);
+  assert.equal(context.captureReviewRemaining, 5000);
+  assert.equal(context.captures.length, 1);
+});
+test('a failed retake restores review and does not consume an attempt', async () => {
+  const context = sessionContext();
+  Object.assign(context, { captures: [{ filename: 'latest.jpg' }], photoboothCaptureCount: 1,
+    isCapturing: false, retakeTarget: 'latest.jpg', captureReviewSettings: { enabled: true, seconds: 5 },
+    cameraProvider: 'webcam', captureBrowserCameraFrame: () => 'frame', captureInFlightRef: { current: false },
+    captureReviewAttempts: 0,
+  });
+  context.fetch = async () => ({ ok: false, json: async () => ({ message: 'Kamera gagal' }) });
+  assert.equal(await appHandler('handleCapture', context)(), false);
+  assert.equal(context.captureReviewAttempts, 0);
+  assert.equal(context.showResult, true);
+  assert.equal(context.retakeTarget, null);
+  assert.equal(context.captures.length, 1);
+});
+
+test('reset during capture list refresh cannot restore review into the new session', async () => {
+  const context = sessionContext();
+  Object.assign(context, { captures: [], photoboothCaptureCount: 1, isCapturing: false,
+    cameraProvider: 'webcam', captureBrowserCameraFrame: () => 'frame', showResult: false,
+  });
+  context.loadCaptures = async () => { context.captureSessionRevisionRef.current += 1; };
+  assert.equal(await appHandler('handleCapture', context)(), false);
+  assert.equal(context.showResult, false);
+});
+
+function appEffect(marker, context) {
+  const effect = app.body.body.find(node => node.type === 'ExpressionStatement' &&
+    node.expression.callee?.name === 'useEffect' && source.slice(node.start, node.end).includes(marker)).expression.arguments[0];
+  return vm.runInNewContext(`(${source.slice(effect.start, effect.end)})`, context);
+}
+function autoCaptureContext(overrides = {}) {
+  const context = sessionContext();
+  Object.assign(context, { activeView: 'photobooth', photoboothStep: 3, captures: [{}], photoboothCaptureCount: 1,
+    showResult: true, retakeTarget: null, isCapturing: false, pageVisible: true, sessionTimeExpired: false,
+    cameraActive: true, cameraPreviewReady: true, sessionTiming: { initialCountdown: 3, nextCountdown: 3 }, ...overrides });
+  context.window = { setTimeout() { context.scheduled = true; }, clearTimeout() {} };
+  return context;
+}
+test('the last photo stays in review and does not schedule the editor', () => {
+  for (const flags of [{showResult:true}, {showResult:false,pageVisible:false}, {showResult:false,sessionTimeExpired:true}]) {
+    const context = autoCaptureContext(flags);
+    appEffect('const nextStepTimer', context)();
+    assert.equal(context.scheduled, undefined);
+    assert.equal(context.photoboothStep, 3);
+  }
+});
+test('a pending last-photo retake stays in capture at the session limit', () => {
+  const context = autoCaptureContext({ photoboothStep: 2, showResult: false, retakeTarget:'latest.jpg', photoboothAdminSettings:{mode:'admin'} });
+  appEffect('const nextStepTimer', context)();
+  assert.equal(context.scheduled, undefined);
+  assert.equal(context.autoCaptureLabel, 'Mode Admin (Manual)');
+});
+test('switching to admin pauses and preserves the pending review', () => {
+  const context = autoCaptureContext({activeView:'admin'});
+  appEffect('const nextStepTimer', context)();
+  assert.equal(context.showResult, true);
+});
+test('review timer pauses when hidden and accepts at expiry', () => {
+  const context = autoCaptureContext();
+  context.advanceCaptureReview = advanceCaptureReview;
+  Object.assign(context, { captureReviewRemaining: 500, boothBusy: false, document:{hidden:false}, performance:{now:()=>context.now},now:0 });
+  context.window = {setInterval(callback){context.tick=callback;},clearInterval(){}};
+  context.acceptCaptureReview = appHandler('acceptCaptureReview', context);
+  const run = appEffect("const captureStep = photoboothAdminSettings.mode", context);
+  const cleanup = run();
+  context.now = 200; context.tick();
+  assert.equal(context.captureReviewRemaining,300);
+  context.document.hidden=true; context.now=1000; context.tick();
+  assert.equal(context.captureReviewRemaining,300);
+  context.document.hidden=false; context.now=1500; context.tick();
+  assert.equal(context.captureReviewRemaining,0);
+  cleanup(); run();
+  assert.equal(context.showResult,false);
+});
+
+test('admin preview policy persists and is snapshotted on session start', async () => {
+  const policy = {enabled:true,seconds:12,allowRetake:false,maxRetakes:3};
+  const settings = globalValue('loadPhotoboothAdminSettings', {
+    window:{localStorage:{getItem:()=>JSON.stringify({captureReview:policy})}},
+    PHOTOBOOTH_ADMIN_SETTINGS_KEY:'settings', DEFAULT_PHOTOBOOTH_ADMIN_SETTINGS:{},
+    normalizeCompressionQuality:()=>70,
+  })();
+  assert.equal(settings.captureReview.seconds,12);
+  assert.equal(settings.captureReview.allowRetake,false);
+  const context = sessionContext();
+  context.photoboothAdminSettings.captureReview = settings.captureReview;
+  await appHandler('handleStartPhotoboothSession',context)();
+  assert.equal(context.captureReviewSettings.seconds,12);
+  context.photoboothAdminSettings.captureReview = {seconds:30};
+  assert.equal(context.captureReviewSettings.seconds,12);
+});
+test('admin retake prohibition and retry limit prevent starting another retake', () => {
+  for (const policy of [{allowRetake:false,maxRetakes:2},{allowRetake:true,maxRetakes:1}]) {
+    const context = sessionContext();
+    Object.assign(context,{showResult:true,isCapturing:false,captureReviewSettings:policy,captureReviewAttempts:1,retakeTarget:null});
+    appHandler('retakeCaptureReview',context)();
+    assert.equal(context.retakeTarget,null);
+    assert.equal(context.showResult,true);
   }
 });

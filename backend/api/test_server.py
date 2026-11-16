@@ -73,6 +73,65 @@ class LocalApiTest(unittest.IsolatedAsyncioTestCase):
         cls.environment.stop()
         cls.directory.cleanup()
 
+    async def test_retake_replaces_latest_photo_at_session_limit(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(self.server, "OUTPUT_DIR", folder):
+            old = Path(folder, "capture_old.jpg")
+            old.write_bytes(b"previous-photo")
+            status, _, body = await request_app(self.server.app, "POST", "/capture", {
+                "max_photo_count": 1, "replace_filename": old.name, "data_base64": valid_jpeg(),
+            })
+            self.assertEqual(status, 200, body)
+            self.assertEqual(json.loads(body)["filename"], old.name)
+            self.assertNotEqual(old.read_bytes(), b"previous-photo")
+            self.assertEqual(list(Path(folder).glob("*.jpg")), [old])
+
+    async def test_retake_rejects_stale_and_unsafe_targets(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(self.server, "OUTPUT_DIR", folder):
+            old = Path(folder, "capture_old.jpg")
+            old.write_bytes(b"old")
+            os.utime(old, (1, 1))
+            latest = Path(folder, "capture_latest.jpg")
+            latest.write_bytes(b"latest")
+            for target in [old.name, "../capture_latest.jpg", "/tmp/capture_latest.jpg", "missing.jpg", 12, ""]:
+                status, _, _ = await request_app(self.server.app, "POST", "/capture", {
+                    "max_photo_count": 6, "replace_filename": target, "data_base64": valid_jpeg(),
+                })
+                self.assertIn(status, (400, 409), target)
+            self.assertEqual(latest.read_bytes(), b"latest")
+            self.assertEqual(len(list(Path(folder).glob("*.jpg"))), 2)
+
+    async def test_failed_retake_preserves_original_and_cleans_temporary_file(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(self.server, "OUTPUT_DIR", folder):
+            old = Path(folder, "capture_old.jpg")
+            old.write_bytes(b"previous-photo")
+            status, _, _ = await request_app(self.server.app, "POST", "/capture", {
+                "max_photo_count": 1, "replace_filename": old.name, "data_base64": "invalid",
+            })
+            self.assertEqual(status, 400)
+            with patch.object(self.server.os, "replace", side_effect=PermissionError("locked")):
+                status, _, _ = await request_app(self.server.app, "POST", "/capture", {
+                    "max_photo_count": 1, "replace_filename": old.name, "data_base64": valid_jpeg(),
+                })
+            self.assertEqual(status, 503)
+            self.assertEqual(old.read_bytes(), b"previous-photo")
+            self.assertEqual(list(Path(folder).glob("*.jpg")), [old])
+
+    async def test_failed_native_retake_does_not_expose_partial_capture(self):
+        from camera.providers import CameraProviderError
+        with tempfile.TemporaryDirectory() as folder, patch.object(self.server, "OUTPUT_DIR", folder):
+            old = Path(folder, "capture_old.jpg")
+            old.write_bytes(b"original")
+            def fail_capture(output_path):
+                Path(output_path).write_bytes(b"partial")
+                raise CameraProviderError("Camera failed")
+            with patch.object(self.server.camera_manager, "selected", "test"), patch.object(self.server.camera_manager, "capture", side_effect=fail_capture):
+                status, _, _ = await request_app(self.server.app, "POST", "/capture", {
+                    "max_photo_count": 1, "replace_filename": old.name,
+                })
+            self.assertEqual(status, 503)
+            self.assertEqual(self.server.get_capture_files(), [str(old)])
+            self.assertEqual(old.read_bytes(), b"original")
+
     async def test_sticker_background_removal_returns_alpha_png_without_saving_catalog(self):
         import cv2
         import numpy as np
