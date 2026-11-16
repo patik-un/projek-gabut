@@ -1,0 +1,27 @@
+.admin-operations-tabs{display:flex;flex-wrap:wrap;gap:8px;padding:12px 0}
+.admin-operations-tabs button{font:inherit;color:var(--text-muted);background:var(--surface-1);border:1px solid var(--line-soft);border-radius:10px;padding:11px 20px;cursor:pointer}
+.admin-operations-tabs button.active{color:#111;background:#f4f4f4;border-color:#f4f4f4;font-weight:700}
+.admin-operations-grid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
+.admin-operations-grid>.admin-column{display:contents}
+.admin-operations-grid [hidden]{display:none!important}
+.booth-settings-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}
+.booth-settings-fields label{display:flex;flex-direction:column;gap:8px;color:var(--text-main);font-size:13px;line-height:1.5}
+.booth-settings-fields input,.booth-settings-fields select{width:100%;min-height:42px;box-sizing:border-box;border:1px solid var(--line-soft);border-radius:8px;padding:9px;background:var(--surface-0);color:var(--text-main);font:inherit}
+.booth-setting-help{font-size:13px;color:var(--text-muted);line-height:1.7}
+.booth-settings-fields>.booth-setting-help{grid-column:1/-1;margin:0}
+.booth-timing-card{grid-column:1/-1}
+.booth-mode-tools{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 20px;background:var(--surface-1);border-bottom:1px solid var(--line-soft);flex-shrink:0}
+.booth-mode-tools .booth-clock{font-size:14px;font-variant-numeric:tabular-nums;color:var(--text-main)}
+.booth-mode-tools button{border:1px solid var(--line-soft);border-radius:8px;background:var(--surface-2);color:var(--text-main);padding:9px 13px;cursor:pointer;font:inherit;margin-left:auto}
+.app.booth-fullscreen>.topbar{display:none}
+.app.booth-fullscreen{height:100dvh;min-height:0}
+.booth-time-shade{position:fixed;inset:0;z-index:16000;display:grid;place-items:center;background:#000b;padding:24px}
+.booth-time-dialog{width:min(460px,100%);box-sizing:border-box;background:var(--surface-1);color:var(--text-main);border:1px solid var(--line-soft);border-radius:18px;padding:28px;box-shadow:0 20px 80px #0008}
+.booth-time-dialog p{line-height:1.7;color:var(--text-muted)}
+.booth-time-dialog .admin-action-row{flex-wrap:wrap}
+@media(max-width:900px){.admin-operations-grid{grid-template-columns:1fr}.booth-settings-fields{grid-template-columns:1fr}.admin-operations-tabs button{padding:10px 14px}}
+.booth-admin-shell{grid-template-rows:auto auto minmax(0,1fr);box-sizing:border-box;min-height:0}
+.booth-print-card{grid-column:1/-1}
+.app.booth-active{display:flex;flex-direction:column;height:100dvh}
+.app.booth-active>.topbar{flex:0 0 72px}
+.app.booth-active>.photobooth-view{flex:1;min-height:0;height:auto}

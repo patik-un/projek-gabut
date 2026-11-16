@@ -1758,9 +1758,18 @@ async def print_photobooth_strip(request: Request):
     except ValueError as error:
         return JSONResponse(status_code=400, content={"success": False, "message": str(error)})
     printer_name = str(payload.get("printer_name") or "").strip()
-    paper_size = str(payload.get("paper_size") or "4r").strip().lower()
-    if paper_size not in ("3r", "4r"):
-        paper_size = "4r"
+    paper_size = payload.get("paper_size", "4r")
+    copies = payload.get("copies", 1)
+    orientation = payload.get("orientation", "portrait")
+    fit = payload.get("fit", "fit")
+    if (paper_size not in ("3r", "4r")
+            or type(copies) is not int or not 1 <= copies <= 10
+            or orientation not in ("portrait", "landscape")
+            or fit not in ("fit", "fill")):
+        return JSONResponse(status_code=400, content={
+            "success": False,
+            "message": "Pengaturan cetak tidak valid: kertas 3R/4R, salinan 1–10, orientasi portrait/landscape, mode fit/fill",
+        })
     filename = safe_filename(payload.get("filename"), "photobooth-strip.jpg")
     print_id = uuid.uuid4().hex
     print_file = os.path.join(
@@ -1789,9 +1798,9 @@ async def print_photobooth_strip(request: Request):
         )
 
     if sys.platform == "win32":
-        result = await run_in_threadpool(print_file_windows, printer_name, print_file, paper_size=paper_size)
+        result = await run_in_threadpool(print_file_windows, printer_name, print_file, paper_size=paper_size, copies=copies, orientation=orientation, fit=fit)
     else:
-        result = await run_in_threadpool(print_file_unix, printer_name, print_file, paper_size=paper_size)
+        result = await run_in_threadpool(print_file_unix, printer_name, print_file, paper_size=paper_size, copies=copies, orientation=orientation, fit=fit)
 
     if result is not None:
         return result
@@ -1800,11 +1809,14 @@ async def print_photobooth_strip(request: Request):
         "success": True,
         "printer_name": printer_name,
         "paper_size": paper_size,
+        "copies": copies,
+        "orientation": orientation,
+        "fit": fit,
         "file": print_file,
     }
 
 
-def print_file_unix(printer_name, print_file, paper_size="4r"):
+def print_file_unix(printer_name, print_file, paper_size="4r", *, copies=1, orientation="portrait", fit="fit"):
     cups_media_by_size = {
         "3r": "Custom.3.5x5in",
         "4r": "Custom.4x6in",
@@ -1817,10 +1829,14 @@ def print_file_unix(printer_name, print_file, paper_size="4r"):
                 "lpr",
                 "-P",
                 printer_name,
+                "-#",
+                str(copies),
                 "-o",
                 f"media={cups_media}",
                 "-o",
-                "fit-to-page",
+                f"orientation-requested={4 if orientation == 'landscape' else 3}",
+                "-o",
+                "fill" if fit == "fill" else "fit-to-page",
                 print_file,
             ],
             capture_output=True,
@@ -1849,7 +1865,7 @@ def print_file_unix(printer_name, print_file, paper_size="4r"):
     return None
 
 
-def print_file_windows(printer_name, print_file, paper_size="4r"):
+def print_file_windows(printer_name, print_file, paper_size="4r", *, copies=1, orientation="portrait", fit="fit"):
     try:
         win32print, win32gui, win32ui, win32con, ImageWin = load_windows_print_runtime()
     except (ImportError, OSError) as error:
@@ -1883,18 +1899,25 @@ def print_file_windows(printer_name, print_file, paper_size="4r"):
         devmode.PaperWidth, devmode.PaperLength = paper_width, paper_height
         devmode.FormName = ""
         devmode.Scale = 100
-        devmode.Orientation = win32con.DMORIENT_PORTRAIT
+        # Emit copies as pages in this job; neutralize any driver default count.
+        devmode.Copies = 1
+        devmode.Fields |= getattr(win32con, "DM_COPIES", 256)
+        devmode.Orientation = win32con.DMORIENT_LANDSCAPE if orientation == "landscape" else win32con.DMORIENT_PORTRAIT
         devmode.Fields &= ~win32con.DM_FORMNAME
         devmode.Fields |= win32con.DM_PAPERSIZE | win32con.DM_PAPERWIDTH | win32con.DM_PAPERLENGTH | win32con.DM_ORIENTATION | win32con.DM_SCALE
         result = win32print.DocumentProperties(0, printer, printer_name, devmode, devmode,
                                               win32con.DM_IN_BUFFER | win32con.DM_OUT_BUFFER)
         if result < 0:
             raise ValueError(f"Driver printer menolak ukuran {paper_size.upper()}")
+        if devmode.Fields & getattr(win32con, "DM_COPIES", 256) and devmode.Copies != 1:
+            raise ValueError("Driver printer menolak pengaturan jumlah salinan")
         dc = win32ui.CreateDCFromHandle(win32gui.CreateDC("WINSPOOL", printer_name, devmode))
         dpi_x = dc.GetDeviceCaps(win32con.LOGPIXELSX)
         dpi_y = dc.GetDeviceCaps(win32con.LOGPIXELSY)
         if dpi_x <= 0 or dpi_y <= 0:
             raise ValueError("Resolusi printer tidak valid")
+        if orientation == "landscape":
+            paper_width, paper_height = paper_height, paper_width
         actual_width = dc.GetDeviceCaps(win32con.PHYSICALWIDTH) * 254 / dpi_x
         actual_height = dc.GetDeviceCaps(win32con.PHYSICALHEIGHT) * 254 / dpi_y
         scaled_by_driver = bool(devmode.Fields & win32con.DM_SCALE) and devmode.Scale != 100
@@ -1905,17 +1928,30 @@ def print_file_windows(printer_name, print_file, paper_size="4r"):
         height = dc.GetDeviceCaps(win32con.VERTRES)
         width = min(width, round(paper_width * dpi_x / 254))
         height = min(height, round(paper_height * dpi_y / 254))
+        if width <= 0 or height <= 0:
+            raise ValueError("Area cetak printer tidak valid")
         with Image.open(print_file) as source:
             image = source.convert("RGB")
+            if fit == "fill":
+                # Crop in physical inches, then fit the crop entirely inside the
+                # printable DC. Pixel-only ratios distort asymmetric-DPI output.
+                target_ratio = (width / dpi_x) / (height / dpi_y)
+                crop_width = min(image.width, image.height * target_ratio)
+                crop_height = min(image.height, image.width / target_ratio)
+                crop_left = (image.width - crop_width) / 2
+                crop_top = (image.height - crop_height) / 2
+                image = image.crop((crop_left, crop_top, crop_left + crop_width, crop_top + crop_height))
             # Fit in physical inches so asymmetric printer DPI cannot distort it.
             scale = min(width / dpi_x / image.width, height / dpi_y / image.height)
             drawn_width, drawn_height = round(image.width * scale * dpi_x), round(image.height * scale * dpi_y)
             left, top = (width - drawn_width) // 2, (height - drawn_height) // 2
             dc.StartDoc("Event Booth Studio")
             started = True
-            dc.StartPage()
-            ImageWin.Dib(image).draw(dc.GetHandleOutput(), (left, top, left + drawn_width, top + drawn_height))
-            dc.EndPage()
+            dib = ImageWin.Dib(image)
+            for _ in range(copies):
+                dc.StartPage()
+                dib.draw(dc.GetHandleOutput(), (left, top, left + drawn_width, top + drawn_height))
+                dc.EndPage()
             dc.EndDoc()
             started = False
     except Exception as error:

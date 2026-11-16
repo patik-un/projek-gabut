@@ -23,7 +23,7 @@ class WindowsPaperSizeTest(unittest.TestCase):
         self.printer.DocumentProperties.return_value = 1
         self.con = types.SimpleNamespace(DM_ORIENTATION=1, DM_PAPERSIZE=2,
             DM_PAPERLENGTH=4, DM_PAPERWIDTH=8, DM_SCALE=16, DM_FORMNAME=0x10000,
-            DMORIENT_PORTRAIT=1, DM_IN_BUFFER=8, DM_OUT_BUFFER=2,
+            DMORIENT_PORTRAIT=1, DMORIENT_LANDSCAPE=2, DM_IN_BUFFER=8, DM_OUT_BUFFER=2,
             DC_PAPERS=2, DC_PAPERSIZE=3, HORZRES=8, VERTRES=10,
             LOGPIXELSX=88, LOGPIXELSY=90, PHYSICALWIDTH=110, PHYSICALHEIGHT=111)
         self.printer.DeviceCapabilities.side_effect = lambda name, port, cap: {
@@ -91,3 +91,48 @@ class WindowsPaperSizeTest(unittest.TestCase):
         self.printer.DocumentProperties.side_effect = normalize
         self.assertIsNone(self.server.print_file_windows('EPSON L3250', self.photo, '4r'))
         self.dc.EndDoc.assert_called_once()
+
+    def test_landscape_swaps_effective_paper_and_renders_three_pages_in_one_job(self):
+        self.caps.update({8: 1800, 10: 1200, 110: 1800, 111: 1200})
+        self.assertIsNone(self.server.print_file_windows('EPSON L3250', self.photo,
+            '4r', copies=3, orientation='landscape'))
+        self.assertEqual(self.mode.Orientation, 2)
+        self.dc.StartDoc.assert_called_once()
+        self.assertEqual(self.dc.StartPage.call_count, 3)
+        self.assertEqual(self.dc.EndPage.call_count, 3)
+        self.dc.EndDoc.assert_called_once()
+        self.dib.return_value.draw.assert_called_with(self.dc.GetHandleOutput(), (500, 0, 1300, 1200))
+        self.printer.SetPrinter.assert_not_called()
+
+    def test_driver_ignoring_landscape_is_rejected_before_job_submission(self):
+        response = self.server.print_file_windows('EPSON L3250', self.photo,
+            orientation='landscape')
+        self.assertEqual(response.status_code, 500)
+        self.dc.StartDoc.assert_not_called()
+        self.printer.SetPrinter.assert_not_called()
+
+    def test_fill_crops_image_to_printable_bounds_using_physical_aspect_ratio(self):
+        self.caps.update({8: 1000, 10: 3000, 90: 600, 110: 1200, 111: 3600})
+        Image.new('RGB', (600, 600)).save(self.photo)
+        self.assertIsNone(self.server.print_file_windows('EPSON L3250', self.photo, fit='fill'))
+        cropped = self.dib.call_args.args[0]
+        self.assertEqual(cropped.size, (400, 600))
+        self.dib.return_value.draw.assert_called_once_with(self.dc.GetHandleOutput(), (0, 0, 1000, 3000))
+
+    def test_driver_default_copies_are_disabled_for_explicit_page_copies(self):
+        self.mode.Copies = 5
+        self.con.DM_COPIES = 256
+        self.assertIsNone(self.server.print_file_windows('EPSON L3250', self.photo, copies=2))
+        self.assertEqual(self.mode.Copies, 1)
+        self.assertTrue(self.mode.Fields & self.con.DM_COPIES)
+        self.assertEqual(self.dc.StartPage.call_count, 2)
+
+    def test_driver_forcing_extra_copies_is_rejected_before_job_submission(self):
+        def normalize(*args):
+            self.mode.Copies = 5
+            self.mode.Fields |= 256
+            return 1
+        self.printer.DocumentProperties.side_effect = normalize
+        response = self.server.print_file_windows('EPSON L3250', self.photo, copies=2)
+        self.assertEqual(getattr(response, 'status_code', None), 500)
+        self.dc.StartDoc.assert_not_called()

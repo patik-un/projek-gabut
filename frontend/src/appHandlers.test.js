@@ -6,6 +6,7 @@ import vm from "node:vm";
 import { requestBackendJson } from "./backendRequest.js";
 import { resolveEditorText, resolveEditorTextItem } from "./photoboothEditor.js";
 import { decorationStyle } from "./decorationArtwork.js";
+import { normalizeBoothOperations } from './boothOperations.js';
 
 const require = createRequire(import.meta.url);
 const { parse } = require("@babel/parser");
@@ -20,6 +21,10 @@ function appHandler(name, context) {
     .flatMap((node) => node.declarations)
     .find((node) => node.id.name === name);
   assert.ok(declaration, `App callback ${name} exists`);
+  context.normalizeBoothOperations ??= normalizeBoothOperations;
+  context.pageVisible ??= true;
+  context.document ??= { hidden: false };
+  context.sessionTimeExpired ??= false;
   return vm.runInNewContext(`(${source.slice(declaration.init.start, declaration.init.end)})`, context);
 }
 
@@ -28,6 +33,7 @@ function globalValue(name, context = {}) {
     .filter((node) => node.type === "VariableDeclaration")
     .flatMap((node) => node.declarations).find((node) => node.id.name === name);
   assert.ok(declaration, `Global helper ${name} exists`);
+  context.normalizeBoothOperations ??= normalizeBoothOperations;
   return vm.runInNewContext(`(${source.slice(declaration.init.start, declaration.init.end)})`, context);
 }
 
@@ -533,11 +539,54 @@ test("first migration keeps the existing global paper and double-strip settings 
 test("printing uses the selected strip paper size", async () => {
   let sent;
   const context = { API_URL: "http://127.0.0.1:8000", activePaperSize: "3r",
-    photoboothAdminSettings: { printerName: "Test Printer", paperSize: "4r" },
+    photoboothAdminSettings: { printerName: "Test Printer", paperSize: "4r", printCopies: 2, printOrientation: 'landscape', printFit: 'fill' },
     setPrintError() {}, setIsPrintingStrip() {}, setStatus() {}, window: { setTimeout() {} },
     fetch: async (_url, options) => { sent = JSON.parse(options.body); return { ok: true, json: async () => ({ success: true }) }; } };
   assert.equal(await appHandler("printPhotoboothStrip", context)("image"), true);
   assert.equal(sent.paper_size, "3r");
+  assert.equal(sent.copies, 2);
+  assert.equal(sent.orientation, 'landscape');
+  assert.equal(sent.fit, 'fill');
+});
+
+test('test printing sends exactly one copy on the configured test paper', async () => {
+  let sent;
+  const context = { API_URL: 'http://127.0.0.1:8000', activePaperSize: '3r',
+    photoboothAdminSettings: { printerName: 'Test', paperSize: '4r', printCopies: 8 },
+    setPrintError() {}, setIsPrintingStrip() {}, setStatus() {}, window: { setTimeout() {} },
+    fetch: async (_url, options) => { sent = JSON.parse(options.body); return { ok: true, json: async () => ({ success: true }) }; } };
+  assert.equal(await appHandler('printPhotoboothStrip', context)('image', { test: true }), true);
+  assert.equal(sent.copies, 1);
+  assert.equal(sent.paper_size, '4r');
+});
+
+test('hidden or expired sessions cannot submit an automatic capture', async () => {
+  for (const flags of [{ pageVisible: false }, { sessionTimeExpired: true }]) {
+    const capture = appHandler('handleCapture', { ...flags, isCapturing: false, backendReady: true,
+      captures: [], photoboothCaptureCount: 1, setIsCapturing() { assert.fail('Capture started'); } });
+    assert.equal(await capture({ automatic: true }), false);
+  }
+});
+
+test('editing timeout prepares a real preview without submitting delivery or print', async () => {
+  const state = {};
+  await appHandler('prepareTimedBoothPreview', { captureSessionRevisionRef: { current: 4 }, isOtoPhotoboothMode: true,
+    setIsRenderingPhotoboothPreview(value) { state.busy = value; },
+    renderPhotoboothStrip: async () => ({ dataUrl: 'data:preview', dataBase64: 'bytes' }),
+    setPhotoboothFinalPreviewUrl(value) { state.preview = value; }, setPhotoboothStep(value) { state.step = value; }, setStatus() {},
+    fetch() { assert.fail('Preview submitted a delivery'); }, printPhotoboothStrip() { assert.fail('Preview printed'); },
+  })();
+  assert.equal(state.preview, 'data:preview');
+  assert.equal(state.step, 5);
+  assert.equal(state.busy, false);
+});
+
+test('an old timed preview cannot change a reset session', async () => {
+  const revision = { current: 1 };
+  await appHandler('prepareTimedBoothPreview', { captureSessionRevisionRef: revision, isOtoPhotoboothMode: true,
+    setIsRenderingPhotoboothPreview() {}, renderPhotoboothStrip: async () => { revision.current++; return { dataUrl: 'old' }; },
+    setPhotoboothFinalPreviewUrl() { assert.fail('Stale preview applied'); }, setPhotoboothStep() { assert.fail('Old session advanced'); }, setStatus() {},
+  })();
 });
 
 test("backend validation errors retain HTTP status so uploads cannot treat them as disconnections", async () => {

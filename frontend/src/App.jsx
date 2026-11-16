@@ -14,6 +14,11 @@ import sisikitaCompanyLogo from "./assets/sisikita-company-logo.png";
 import "./App.css";
 import AppUpdates from './AppUpdates.jsx';
 import { updateBusyReason } from './appUpdater.js';
+import { normalizeBoothOperations, formatBoothTime, createPrintTestImage } from './boothOperations.js';
+import { useBoothClock } from './useBoothClock.js';
+import { useBoothFullscreen } from './useBoothFullscreen.js';
+import { AdminOperationsTabs, PrintOperationsSettings, TimingOperationsSettings } from './BoothOperationsSettings.jsx';
+import './BoothOperations.css';
 
 const API_URL = "http://127.0.0.1:8000";
 const DEFAULT_WATERMARK_SETTINGS = {
@@ -637,6 +642,7 @@ const buildCompressEditPreviewFilter = (adjustments, effectId) => {
     .join(" ");
 };
 const DEFAULT_PHOTOBOOTH_ADMIN_SETTINGS = {
+  ...normalizeBoothOperations(),
   stripPhotoCount: 1,
   defaultStripId: "photobooth-strip-1",
   stripSettings: {},
@@ -879,6 +885,7 @@ const loadPhotoboothAdminSettings = () => {
     );
 
     return {
+      ...normalizeBoothOperations(parsed),
       stripPhotoCount: Number.isInteger(stripPhotoCount) && stripPhotoCount >= 1 && stripPhotoCount <= 10
         ? stripPhotoCount
         : 1,
@@ -949,6 +956,7 @@ const mergeWatermarkData = (current, data, uploadOrientation = null) => {
 function App({ onUpdateLock }) {
   const [editorUpdateBusy, setEditorUpdateBusy] = useState(false);
   const fileInputRef = useRef(null);
+  const adminGridRef = useRef(null);
   const folderInputRef = useRef(null);
   const watchSettingsRevisionRef = useRef(0);
   const watchFolderDraftRef = useRef(null);
@@ -1016,7 +1024,9 @@ const hasMovedCarouselRef = useRef(false);
   const [isPrintingStrip, setIsPrintingStrip] = useState(false);
   const [printError, setPrintError] = useState("");
   const [activeView, setActiveView] = useState("photobooth");
-  const [adminStep, setAdminStep] = useState(1);
+  const [adminTab, setAdminTab] = useState("photobooth");
+  useEffect(() => { adminGridRef.current?.scrollTo({ top: 0 }); }, [adminTab]);
+  const boothFullscreen = useBoothFullscreen();
   const [editorCatalog, setEditorCatalog] = useState(null);
   const [editorCatalogError, setEditorCatalogError] = useState("");
   const [editorCatalogReload, setEditorCatalogReload] = useState(0);
@@ -1672,6 +1682,17 @@ const hasMovedCarouselRef = useRef(false);
   );
   const selectedStripPrintSettings = photoboothAdminSettings.stripSettings?.[selectedPhotoboothStrip?.id];
   const activePaperSize = selectedStripPrintSettings?.paper_size || photoboothAdminSettings.paperSize || "4r";
+  const [pageVisible, setPageVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const update = () => setPageVisible(!document.hidden);
+    document.addEventListener('visibilitychange', update);
+    return () => document.removeEventListener('visibilitychange', update);
+  }, []);
+  const boothBusy = isCapturing || isFinalizingPhotobooth || isRenderingPhotoboothPreview || isPreparingPhotoboothGif || isPrintingStrip || isUploadingPhotoboothDrive || isUploading || isUploadingTemplate || isUploadingWatermark;
+  const boothTimer = useBoothClock({ mode: photoboothAdminSettings.mode, step: photoboothStep,
+    timing: photoboothAdminSettings.timing, active: activeView === 'photobooth', busy: boothBusy });
+  const sessionTimeExpired = boothTimer.clock?.expired === 'session';
+  const sessionTiming = boothTimer.clock?.timing || photoboothAdminSettings.timing;
   const activePaperConfig = getStripPaperConfig(activePaperSize);
   const doubleStripAvailable = photoboothPhotoCount >= 1;
   const doubleStripEnabled =
@@ -3117,6 +3138,7 @@ const hasMovedCarouselRef = useRef(false);
   };
 
   const handleCapture = async ({ automatic = false } = {}) => {
+    if (!pageVisible || document.hidden || sessionTimeExpired) return false;
     if (isCapturing || !backendReady) {
       setStatus("Kamera belum siap");
       return false;
@@ -3272,7 +3294,7 @@ const hasMovedCarouselRef = useRef(false);
       return () => window.clearTimeout(nextStepTimer);
     }
 
-    if (!backendReady || isCapturing || !cameraActive || !cameraPreviewReady) {
+    if (!pageVisible || sessionTimeExpired || !backendReady || isCapturing || !cameraActive || !cameraPreviewReady) {
       clearAutoCaptureTimers();
       setAutoCaptureCountdown(null);
       setAutoCaptureLabel(
@@ -3298,8 +3320,8 @@ const hasMovedCarouselRef = useRef(false);
 
     const delay =
       captures.length === 0
-        ? PHOTOBOOTH_INITIAL_CAPTURE_DELAY
-        : PHOTOBOOTH_NEXT_CAPTURE_DELAY;
+        ? sessionTiming.initialCountdown
+        : sessionTiming.nextCountdown;
     const readyDelay =
       captures.length === 0
         ? PHOTOBOOTH_INITIAL_READY_MS
@@ -3342,6 +3364,10 @@ const hasMovedCarouselRef = useRef(false);
     photoboothPhotoCount,
     photoboothStep,
     showResult,
+    sessionTimeExpired,
+    pageVisible,
+    sessionTiming.initialCountdown,
+    sessionTiming.nextCountdown,
   ]);
 
   const readFileAsBase64 = (file) =>
@@ -5707,6 +5733,23 @@ const hasMovedCarouselRef = useRef(false);
     return () => { controller.abort(); window.clearTimeout(timer); };
   }, [backendReady, photoboothDriveResult?.queued, photoboothDriveResult?.delivery_id]);
 
+  const prepareTimedBoothPreview = async () => {
+    const revision = captureSessionRevisionRef.current;
+    setIsRenderingPhotoboothPreview(true);
+    setStatus('Menyiapkan pratinjau hasil…');
+    try {
+      const composite = await renderPhotoboothStrip();
+      if (revision !== captureSessionRevisionRef.current) return;
+      setPhotoboothFinalPreviewUrl(composite.dataUrl);
+      setPhotoboothStep(isOtoPhotoboothMode ? 5 : 4);
+      setStatus('Waktu edit selesai. Periksa hasil sebelum cetak dan simpan.');
+    } catch (error) {
+      if (revision === captureSessionRevisionRef.current) setStatus(`Pratinjau gagal: ${error.message || error}. Gunakan tombol lanjut untuk mencoba lagi.`);
+    } finally {
+      if (revision === captureSessionRevisionRef.current) setIsRenderingPhotoboothPreview(false);
+    }
+  };
+
   const finalizePhotobooth = async () => {
     if (photoboothFinalizationLockRef.current || isFinalizingPhotobooth || isRenderingPhotoboothPreview) return;
     if (photoboothSlotCaptures.length < photoboothCaptureCount) {
@@ -5927,9 +5970,10 @@ const hasMovedCarouselRef = useRef(false);
     }
   };
 
-  const printPhotoboothStrip = async (dataBase64, { automatic = false } = {}) => {
+  const printPhotoboothStrip = async (dataBase64, { automatic = false, test = false } = {}) => {
     const printerName = photoboothAdminSettings.printerName.trim();
-    const paperSize = activePaperSize;
+    const paperSize = test ? photoboothAdminSettings.paperSize : activePaperSize;
+    const printOptions = normalizeBoothOperations(photoboothAdminSettings);
 
     if (!printerName) {
       const message = "Pilih printer di admin panel dulu";
@@ -5968,6 +6012,9 @@ const hasMovedCarouselRef = useRef(false);
           data_base64: dataBase64,
           printer_name: printerName,
           paper_size: paperSize,
+          copies: test ? 1 : printOptions.printCopies,
+          orientation: printOptions.printOrientation,
+          fit: printOptions.printFit,
         }),
       });
       const data = await response.json();
@@ -6405,6 +6452,17 @@ const hasMovedCarouselRef = useRef(false);
     saving: editorUpdateBusy || isUploading || isUploadingWatermark || isUploadingTemplate ||
       isUploadingPhotoboothDrive || isSavingWatchFolder || isRunningStartup || isVerifyingGoogleToken || isConnectingDrive,
   });
+
+  useEffect(() => {
+    if (activeView !== 'photobooth' || !pageVisible || boothBusy || !boothTimer.clock?.expired) return;
+    if (boothTimer.clock.expired === 'selection' && backendReady && selectedPhotoboothStrip) {
+      boothTimer.acknowledge();
+      void handleStartPhotoboothSession();
+    } else if (boothTimer.clock.expired === 'editing') {
+      boothTimer.acknowledge();
+      void prepareTimedBoothPreview();
+    }
+  }, [activeView, pageVisible, boothBusy, boothTimer.clock?.expired, backendReady, selectedPhotoboothStrip, photoboothAdminSettings.mode]);
 
   const watermarkPanel = (
     <div className="watermark-panel">
@@ -6970,8 +7028,8 @@ const hasMovedCarouselRef = useRef(false);
   };
 
   return (
-    <div className="app">
-      <header className="topbar">
+    <div className={`app${activeView === "photobooth" ? " booth-active" : ""}${boothFullscreen.fullscreen && activeView === "photobooth" ? " booth-fullscreen" : ""}`}>
+      <header className="topbar" inert={sessionTimeExpired || isRenderingPhotoboothPreview}>
         <div className="app-brand">
           <img src={sisikitaCompanyLogo} alt="Sisikita Creative" />
           <div>
@@ -7077,40 +7135,7 @@ const hasMovedCarouselRef = useRef(false);
           </>
         )}
 
-        {/* Step indicators for Admin */}
-        {activeView === "admin" && (
-          <>
-            <div className="topbar-step-indicator" aria-label="Langkah Admin">
-              <button
-                type="button"
-                className={adminStep === 1 ? "step-num active" : "step-num"}
-                onClick={() => setAdminStep(1)}
-                title="Langkah 1: Auth Drive & Sistem"
-              >
-                1
-              </button>
-              <button
-                type="button"
-                className={adminStep === 2 ? "step-num active" : "step-num"}
-                onClick={() => setAdminStep(2)}
-                title="Langkah 2: Pengaturan Photobooth & Cetak"
-              >
-                2
-              </button>
-              <button
-                type="button"
-                className={adminStep === 3 ? "step-num active" : "step-num"}
-                onClick={() => setAdminStep(3)}
-                title="Langkah 3: Auto Upload & Preset Optimasi"
-              >
-                3
-              </button>
-            </div>
-            <span className="topbar-file-count">
-              {adminStep === 1 ? "Auth & Sistem" : adminStep === 2 ? "Photobooth & Cetak" : "Preset & Upload"}
-            </span>
-          </>
-        )}
+        {activeView === "admin" && <span className="topbar-file-count">Pengaturan Administrator</span>}
         <div className="tabs" role="tablist" aria-label="Mode aplikasi">
            <button
              type="button"
@@ -7143,8 +7168,26 @@ const hasMovedCarouselRef = useRef(false);
         </div>
       </header>
 
+      {activeView === 'photobooth' && <div className="booth-mode-tools">
+        {boothTimer.clock?.stageRemaining !== null && boothTimer.clock?.stageRemaining !== undefined &&
+          <span className="booth-clock">{boothTimer.clock.stage === 'selection' ? 'Pilih strip' : 'Edit foto'}: {formatBoothTime(boothTimer.clock.stageRemaining)}</span>}
+        {boothTimer.clock?.sessionRemaining !== null && boothTimer.clock?.sessionRemaining !== undefined && ['capture','editing'].includes(boothTimer.clock.stage) &&
+          <span className="booth-clock">Sisa sesi: {formatBoothTime(boothTimer.clock.sessionRemaining)}</span>}
+        {boothFullscreen.error && <span role="alert">{boothFullscreen.error}</span>}
+        <button type="button" onClick={() => boothFullscreen.change(!boothFullscreen.fullscreen)}>
+          {boothFullscreen.fullscreen ? 'Keluar fullscreen (Esc)' : 'Fullscreen Photobooth'}
+        </button>
+      </div>}
+      {activeView === 'photobooth' && sessionTimeExpired && <div className="booth-time-shade">
+        <section className="booth-time-dialog" role="dialog" aria-modal="true" aria-labelledby="booth-time-title">
+          <h2 id="booth-time-title">Waktu sesi habis</h2><p>Sesi dijeda. Foto tetap tersedia. Lanjutkan sesi bersama operator atau akhiri untuk pengguna berikutnya.</p>
+          <div className="admin-action-row"><button type="button" className="secondary-button compact" onClick={boothTimer.resume}>Lanjutkan sesi</button>
+            <button type="button" className="upload-button compact" disabled={boothBusy} onClick={handleFinishPhotoboothSession}>Akhiri sesi</button></div>
+        </section>
+      </div>}
       {activeView === "photobooth" ? (
         <main
+          inert={sessionTimeExpired || isRenderingPhotoboothPreview}
           className={`photobooth-view${
             isOtoMode && photoboothStep === 2 ? " photobooth-strip-select-view" : ""
           }`}
@@ -9773,7 +9816,7 @@ onPointerMove={onEditCropPointerMove}
         </main>
       ) : (
         <main className="admin-view">
-          <section className="admin-shell">
+          <section className="admin-shell booth-admin-shell">
             <section className="admin-hero">
               <div className="admin-hero-row">
                 <div>
@@ -9793,10 +9836,14 @@ onPointerMove={onEditCropPointerMove}
               </div>
             </section>
 
-            <section className="admin-grid">
+            <AdminOperationsTabs value={adminTab} onChange={setAdminTab} />
+            <section className="admin-grid admin-operations-grid" ref={adminGridRef}>
+              <div hidden={adminTab !== 'timing'} style={{gridColumn: '1 / -1'}}>
+                <TimingOperationsSettings settings={photoboothAdminSettings} onChange={setPhotoboothAdminSettings} />
+              </div>
               <div className="admin-column admin-column-left">
 
-              <section className="admin-card sparse admin-col-left">
+              <section className="admin-card sparse admin-col-left" hidden={adminTab !== 'system'}>
                 <div className="template-panel-header">
                   <div>
                     <h2>Google Drive Auth</h2>
@@ -9832,7 +9879,7 @@ onPointerMove={onEditCropPointerMove}
                 </div>
               </section>
 
-              <section className="admin-card sparse admin-col-left">
+              <section className="admin-card sparse admin-col-left" hidden={adminTab !== 'photobooth'}>
                 <div className="template-panel-header">
                   <div>
                     <h2>Mode Operasi Photobooth</h2>
@@ -9880,7 +9927,7 @@ onPointerMove={onEditCropPointerMove}
                 </div>
               </section>
 
-              <section className="admin-card sparse admin-col-left">
+              <section className="admin-card sparse admin-col-left" hidden={adminTab !== 'photobooth'}>
                 <div className="template-panel-header">
                   <div>
                     <h2>Edit Strip</h2>
@@ -9906,10 +9953,10 @@ onPointerMove={onEditCropPointerMove}
                 </div>
               </section>
 
-              <PhotoboothEditorAdmin settings={editorCatalog} apiUrl={API_URL} onSaved={commitEditorCatalog} onUpdateBusy={setEditorUpdateBusy}
-                error={editorCatalogError} onRetry={() => setEditorCatalogReload((value) => value + 1)} />
+              <div hidden={adminTab !== 'strip'}><PhotoboothEditorAdmin settings={editorCatalog} apiUrl={API_URL} onSaved={commitEditorCatalog} onUpdateBusy={setEditorUpdateBusy}
+                error={editorCatalogError} onRetry={() => setEditorCatalogReload((value) => value + 1)} /></div>
 
-              <section className="admin-card sparse admin-col-left">
+              <section className="admin-card sparse admin-col-left" hidden={adminTab !== 'system'}>
                 <div className="template-panel-header">
                   <div>
                     <h2>Drive Awal Photobooth</h2>
@@ -9970,10 +10017,10 @@ onPointerMove={onEditCropPointerMove}
                 </div>
               </section>
 
-              <section className="admin-card admin-col-left">
+              <section className="admin-card admin-col-left booth-print-card" hidden={adminTab !== 'print'}>
                 <div className="template-panel-header">
                   <div>
-                    <h2>Cetak Otomatis</h2>
+                    <h2>Printer & Cetak</h2>
                     <span>Cetak strip otomatis saat sesi selesai.</span>
                   </div>
                   <label className="toggle-switch">
@@ -9990,7 +10037,7 @@ onPointerMove={onEditCropPointerMove}
                     <span className="toggle-slider"></span>
                   </label>
                 </div>
-                {photoboothAdminSettings.autoPrintEnabled && (
+                {(
                   <>
                     <label className="admin-input-field">
                       Printer
@@ -10038,6 +10085,9 @@ onPointerMove={onEditCropPointerMove}
                     {printError && <div className="auth-error">{printError}</div>}
                   </>
                 )}
+                <PrintOperationsSettings settings={photoboothAdminSettings} onChange={setPhotoboothAdminSettings}
+                  disabled={!backendReady || boothBusy} printing={isPrintingStrip}
+                  onTest={() => printPhotoboothStrip(createPrintTestImage(photoboothAdminSettings.paperSize, photoboothAdminSettings.printOrientation), { test: true })} />
                 {lastStripResultRef.current && (
                   <div>
                     <div className="admin-setting-note" style={{ marginBottom: 8 }}>
@@ -10061,7 +10111,7 @@ onPointerMove={onEditCropPointerMove}
                 </div>
               </section>
 
-              <section className="admin-card sparse admin-col-left">
+              <section className="admin-card sparse admin-col-left" hidden={adminTab !== 'system'}>
                 <div className="template-panel-header">
                   <div>
                     <h2>Output File</h2>
@@ -10113,7 +10163,7 @@ onPointerMove={onEditCropPointerMove}
               </div>
 
               <div className="admin-column admin-column-right">
-              <section className="admin-card admin-col-right admin-strip-card">
+              <section className="admin-card admin-col-right admin-strip-card" hidden={adminTab !== 'strip'}>
                 <div className="template-panel-header">
                   <div>
                     <h2>Kelola Strip</h2>
@@ -10364,7 +10414,7 @@ onPointerMove={onEditCropPointerMove}
                 )}
               </section>
 
-              <section className="admin-card admin-col-right">
+              <section className="admin-card admin-col-right" hidden={adminTab !== 'camera'}>
                 <div className="template-panel-header">
                   <div>
                     <h2>Kamera</h2>
