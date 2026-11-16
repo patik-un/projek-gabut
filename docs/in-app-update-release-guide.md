@@ -1,7 +1,10 @@
 # Rilis update aplikasi Windows
 
-Mulai 0.1.6, aplikasi memeriksa GitHub Releases saat dibuka dan setiap 6 jam.
-Tombol Tentang / Update dapat digunakan sebelum login. Versi lama harus
+Mulai 0.1.6, aplikasi mendukung update bertanda tangan dari GitHub Releases.
+Pada 0.1.6 tombol Tentang / Update tersedia sebelum login; mulai 0.1.7 tombol
+dan informasi update hanya tersedia di header Admin Panel setelah login admin.
+Pemeriksaan otomatis berjalan ketika Admin Panel dibuka dan setiap 6 jam
+selama panel tersebut tetap terbuka. Versi lama harus
 dipasangi 0.1.6 sekali secara manual; setelah itu versi baru tampil di aplikasi.
 Pilih Unduh & pasang ketika sesi foto/cetak/penyimpanan telah selesai.
 
