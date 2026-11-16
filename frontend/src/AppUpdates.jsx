@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { createAppUpdater } from './appUpdater.js';
@@ -38,7 +39,7 @@ export default function AppUpdates({ busyReason, onLock, adapter = nativeUpdater
       <button type="button" onClick={() => setOpen(true)}>Lihat pembaruan</button>
       <button type="button" onClick={() => controller.current.postpone()}>Nanti</button>
     </div>}
-    {(open || locked) && <div className="update-shade">
+    {(open || locked) && createPortal(<div className="update-shade">
       <section className="update-panel" role="dialog" aria-modal="true" aria-labelledby="update-title">
         <h2 id="update-title">Pembaruan aplikasi</h2>
         <p>Versi sekarang: <strong>{state.currentVersion || 'Memuat…'}</strong></p>
@@ -57,6 +58,6 @@ export default function AppUpdates({ busyReason, onLock, adapter = nativeUpdater
             onClick={() => controller.current.install()}>{state.phase === 'error' ? 'Coba lagi' : 'Unduh & pasang'}</button>}
         </div>
       </section>
-    </div>}
+    </div>, document.body)}
   </aside>;
 }

@@ -946,7 +946,7 @@ const mergeWatermarkData = (current, data, uploadOrientation = null) => {
   };
 };
 
-function App({ onBusyChange }) {
+function App({ onUpdateLock }) {
   const [editorUpdateBusy, setEditorUpdateBusy] = useState(false);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
@@ -6405,7 +6405,6 @@ const hasMovedCarouselRef = useRef(false);
     saving: editorUpdateBusy || isUploading || isUploadingWatermark || isUploadingTemplate ||
       isUploadingPhotoboothDrive || isSavingWatchFolder || isRunningStartup || isVerifyingGoogleToken || isConnectingDrive,
   });
-  useEffect(() => { onBusyChange(updateReason); }, [updateReason, onBusyChange]);
 
   const watermarkPanel = (
     <div className="watermark-panel">
@@ -9782,6 +9781,7 @@ onPointerMove={onEditCropPointerMove}
                   <h1>Admin Panel</h1>
                 </div>
                 <div className="admin-hero-right">
+                  <AppUpdates busyReason={updateReason} onLock={onUpdateLock} />
                   <button
                     type="button"
                     className="logout-button"
@@ -10606,8 +10606,6 @@ onPointerMove={onEditCropPointerMove}
 }
 
 export default function UpdatedApp() {
-  const [busyReason, setBusyReason] = useState('');
   const [locked, setLocked] = useState(false);
-  return <><div inert={locked} aria-busy={locked}><App onBusyChange={setBusyReason} /></div>
-    <AppUpdates busyReason={busyReason} onLock={setLocked} /></>;
+  return <div inert={locked} aria-busy={locked}><App onUpdateLock={setLocked} /></div>;
 }
