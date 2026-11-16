@@ -48,6 +48,6 @@
 - [x] Generate durable project signing key without printing secret; save ignored local backup only. Public key goes in updater config. User explicitly declined uploading the key.
 - [x] Sign the successful Windows artifact locally. Publish via public signing JSON only after signature/checksum/provenance/tag validation. Keep branch test builds as artifacts. Use narrowly scoped release job permissions.
 - [x] Bump all versions to 0.1.6; document one-time bootstrap install, future tag releases, key backup and physical Windows test limits.
-- [ ] Independent final review and local verification complete; finish scoped commit/push, dispatch Windows build, sign locally, tag tested commit and verify stable release assets/manifest. Report exact validation boundaries.
+- [x] Independent final review and local verification complete; finish scoped commit/push, dispatch Windows build, sign locally, tag tested commit and verify stable release assets/manifest. Report exact validation boundaries.
 
-Execution note: local implementation and review complete. GitHub Windows build, local signing of its installer and stable publication remain in progress. User declined cloud key upload; public-payload publication replaces Actions-secret signing.
+Execution note (2026-11-16): Windows build #17, local signing and stable publication #18 complete. Public manifest URL corrected after detecting GitHub asset-name normalization; 133 frontend tests and final unauthenticated release checks pass. See `docs/windows-autoupdate-verification-2026-11-16.md`. User declined cloud key upload; public-payload publication replaces Actions-secret signing. Interactive Windows upgrade transition remains a validation boundary.
