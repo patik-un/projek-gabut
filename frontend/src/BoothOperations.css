@@ -1,7 +1,8 @@
 .admin-operations-tabs{display:flex;flex-wrap:wrap;gap:8px;padding:12px 0}
 .admin-operations-tabs button{font:inherit;color:var(--text-muted);background:var(--surface-1);border:1px solid var(--line-soft);border-radius:10px;padding:11px 20px;cursor:pointer}
 .admin-operations-tabs button.active{color:#111;background:#f4f4f4;border-color:#f4f4f4;font-weight:700}
-.admin-operations-grid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
+/* Cards must keep their content height inside the scrollable admin grid. */
+.admin-operations-grid{grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:max-content;align-content:start;align-items:start}
 .admin-operations-grid>.admin-column{display:contents}
 .admin-operations-grid [hidden]{display:none!important}
 .booth-settings-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}
