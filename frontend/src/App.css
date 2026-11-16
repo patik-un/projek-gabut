@@ -11621,3 +11621,7 @@ input[type="range"] {
   .studio-simple .studio-finish-btn { justify-self: stretch; }
   .studio-simple .studio-badge-pill { max-width: 100%; }
 }
+.studio-decoration-catalog .studio-catalog-text{grid-column:span 2;min-width:0;max-width:100%;min-height:64px;overflow:hidden}
+.studio-decoration-catalog .studio-catalog-text .design-artwork{max-width:100%;max-height:64px;object-fit:contain}
+.studio-decoration-size{font-size:12px;font-weight:700;color:var(--text-main);font-variant-numeric:tabular-nums}
+.decor-btn.decor-text-size{width:auto;min-width:30px;padding:0 5px;font-size:12px;font-weight:800;white-space:nowrap}

@@ -2600,8 +2600,7 @@ const hasMovedCarouselRef = useRef(false);
   }, [backendReady, editorCatalogReload]);
 
   useEffect(() => {
-    if ((editStudioTab === "sticker" && !publishedEditorItems.stickers.length) ||
-        (editStudioTab === "text" && !publishedEditorItems.texts.length)) {
+    if (editStudioTab === "decorations" && !publishedEditorItems.stickers.length && !publishedEditorItems.texts.length) {
       setEditStudioTab("filter");
     }
   }, [publishedEditorItems, editStudioTab]);
@@ -3680,6 +3679,7 @@ const hasMovedCarouselRef = useRef(false);
     event.stopPropagation();
     setActiveStudioSide(sideIndex);
     setSelectedDecoration({ type, id });
+    setEditStudioTab("decorations");
     const targetElement = event.currentTarget;
     if (typeof targetElement.setPointerCapture === "function") {
       targetElement.setPointerCapture(event.pointerId);
@@ -6730,9 +6730,11 @@ const hasMovedCarouselRef = useRef(false);
     if (selectedDecoration?.type !== type) return null;
     const label = type === "sticker" ? "stiker" : "teks";
     const scaleStep = type === "sticker" ? 0.15 : 0.1;
+    const item = (type === "sticker" ? stripDecorations : stripTexts).find((entry) => entry.id === selectedDecoration.id);
     return (
       <div className="studio-selection-toolbar">
-        <span>{type === "sticker" ? "Tarik stiker untuk geser, sudut untuk ukuran, dan ↻ untuk putar." : "Geser teks langsung pada strip."}</span>
+        <span>{type === "sticker" ? "Tarik stiker untuk geser, sudut untuk ukuran, dan ↻ untuk putar." : "Geser teks pada strip. Gunakan A− / A+ atau tombol ukuran di bawah."}</span>
+        <output className="studio-decoration-size" aria-label={`Ukuran ${label}`}>Ukuran {Math.round((item?.scale || 1) * 100)}%</output>
         <div className="selection-btn-group">
           <button type="button" className="secondary-button compact" aria-label={`Perkecil ${label}`}
             onClick={() => updateSelectedDecorationScale(-scaleStep)}>Perkecil</button>
@@ -6855,7 +6857,11 @@ const hasMovedCarouselRef = useRef(false);
               {textItem.artwork ? <img className="decoration-saved-artwork" src={textItem.artwork.src} alt={textItem.text} draggable={false}
                 style={{ width: `${textItem.artwork.widthPercent}cqw` }} /> : <span className="decoration-text-inner">{textItem.text}</span>}
               {isSelected && (
-                <div className="decoration-controls-bar">
+                <div className="decoration-controls-bar" onPointerDown={(event) => event.stopPropagation()}>
+                  <button type="button" className="decor-btn decor-text-size" aria-label="Perkecil teks pada strip" title="Perkecil teks"
+                    onClick={(event) => { event.stopPropagation(); updateSelectedDecorationScale(-0.1); }}>A−</button>
+                  <button type="button" className="decor-btn decor-text-size" aria-label="Perbesar teks pada strip" title="Perbesar teks"
+                    onClick={(event) => { event.stopPropagation(); updateSelectedDecorationScale(0.1); }}>A+</button>
                   <button
                     type="button"
                     className="decor-btn decor-del"
@@ -7873,8 +7879,8 @@ const hasMovedCarouselRef = useRef(false);
                       </p>
                     )}
                     <div className="studio-tabs-bar" role="tablist" aria-label="Alat edit foto">
-                      {[["filter", "Filter"], ["sticker", "Stiker"], ["text", "Teks"]]
-                        .filter(([id]) => id === "filter" || (id === "sticker" ? publishedEditorItems.stickers.length : publishedEditorItems.texts.length))
+                      {[["filter", "Filter"], ["decorations", "Stiker & Teks"]]
+                        .filter(([id]) => id === "filter" || publishedEditorItems.stickers.length || publishedEditorItems.texts.length)
                         .map(([id, label]) => (
                         <button key={id} type="button" role="tab" id={`studio-tool-${id}`}
                           aria-selected={editStudioTab === id} aria-controls={`studio-panel-${id}`}
@@ -7970,45 +7976,29 @@ const hasMovedCarouselRef = useRef(false);
                       </div>
                     )}
 
-                    {/* TAB CONTENT: STIKER */}
-                    {editStudioTab === "sticker" && (
-                      <div className="studio-tab-panel" role="tabpanel" id="studio-panel-sticker" aria-labelledby="studio-tool-sticker">
+                    {/* SHARED STICKER AND TEXT PANEL */}
+                    {editStudioTab === "decorations" && (
+                      <div className="studio-tab-panel" role="tabpanel" id="studio-panel-decorations" aria-labelledby="studio-tool-decorations">
                         <div className="studio-panel-header">
-                          <h3>Tambahkan stiker</h3>
-                          <span>Pilih stiker, lalu geser di strip.</span>
+                          <h3>Stiker & Teks</h3>
+                          <span>Pilih hiasan, lalu geser dan ubah ukurannya pada strip.</span>
                         </div>
-
-                        {renderStudioSelectionTools("sticker")}
-
-                        <div className="studio-sticker-grid">
+                        {selectedDecoration && renderStudioSelectionTools(selectedDecoration.type)}
+                        <div className="studio-sticker-grid studio-decoration-catalog">
                           {publishedEditorItems.stickers.map((item) => (
-                            <button key={item.id} type="button" className="studio-sticker-btn"
+                            <button key={`sticker-${item.id}`} type="button" className="studio-sticker-btn"
                               aria-label={`Tambahkan stiker ${item.name}`}
                               onClick={() => handleAddSticker(item.content, item.kind, item.id)}>
                               <DecorationArtwork item={item} type="sticker" />
                             </button>
                           ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* TAB CONTENT: TEKS */}
-                    {editStudioTab === "text" && (
-                      <div className="studio-tab-panel" role="tabpanel" id="studio-panel-text" aria-labelledby="studio-tool-text">
-                        <div className="studio-panel-header">
-                          <h3>Tambahkan tulisan</h3>
-                          <span>Pilih tulisan yang tersedia, lalu geser di strip.</span>
-                        </div>
-                        <div className="studio-preset-tags">
                           {publishedEditorItems.texts.map((item) => (
-                            <button key={item.id} type="button" className="studio-preset-tag studio-designed-text" aria-label={`Tambahkan tulisan ${item.text}`}
-                              onClick={() => handleAddText(item.text, item.id)}><DecorationArtwork item={item} type="text" /></button>
+                            <button key={`text-${item.id}`} type="button" className="studio-preset-tag studio-designed-text studio-catalog-text"
+                              aria-label={`Tambahkan tulisan ${item.text}`} onClick={() => handleAddText(item.text, item.id)}>
+                              <DecorationArtwork item={item} type="text" />
+                            </button>
                           ))}
                         </div>
-
-                        {renderStudioSelectionTools("text")}
-
-
                       </div>
                     )}
 
