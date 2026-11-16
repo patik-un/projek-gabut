@@ -20,7 +20,7 @@ test('manifest uses versioned public asset URL and signature content', t => {
   assert.equal(manifest.version, '0.1.6');
   assert.equal(manifest.platforms['windows-x86_64'].signature, f.signature);
   assert.equal(manifest.platforms['windows-x86_64'].url,
-    'https://github.com/patik-un/projek-gabut/releases/download/v0.1.6/Event%20Booth%20Studio_0.1.6_x64-setup.exe');
+    'https://github.com/patik-un/projek-gabut/releases/download/v0.1.6/Event.Booth.Studio_0.1.6_x64-setup.exe');
 });
 test('mismatched version tag prevents publication', t => {
   assert.throws(() => buildUpdateManifest({ ...fixture(t), tag: 'v0.1.5' }), /tag/i);
