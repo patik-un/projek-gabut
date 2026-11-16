@@ -1076,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "getrandom 0.3.4",
  "reqwest",
