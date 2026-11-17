@@ -38,7 +38,7 @@
 
 /* Menu containers reveal the booth backdrop; photo, strip and QR canvases keep their own surfaces. */
 .app.booth-active :is(.topbar,.tabs,.photobooth-view,.photobooth-wizard,.step-panel,
-  .start-card,.oto-step2-header,.oto-config-card,.oto-step2-preview-panel,.selected-strip-mockup,
+  .start-card,.oto-step2-header,.oto-config-card,.oto-step2-preview-panel,.selected-strip-mockup,.strip-picker,
   .booth-mode-tools,.capture-strip-header,.step-footer,.capture-review-actions,
   .studio-top-bar,.studio-canvas-area,.studio-dock,.studio-selection-toolbar,.oto-step2-footer-bar,
   .photobooth-final-preview,.photobooth-drive-card,.photobooth-delivery-status,.app-status){
@@ -54,3 +54,26 @@
   .studio-top-info,.step-footer,.capture-review-actions>span,.drive-result-copy,.app-status){
   text-shadow:0 1px 3px #000,0 0 8px #0009;
 }
+
+/* Keep captions readable on bright and dark event backgrounds without filling panels. */
+.app.booth-active :is(.app-brand strong,.app-brand span,.topbar-file-count,.step-num,
+  .start-copy h1,.start-copy p,.start-eyebrow,.oto-step2-header h1,.oto-step2-header p,.step2-badge,
+  .strip-carousel-name,.strip-carousel-meta,.strip-card-pose-badge,.strip-card-selected-tag,
+  .step2-footer-info span,.step2-footer-info strong,.step2-footer-info small,
+  .capture-session-copy strong,.capture-session-copy span,.capture-photo-counter strong,.capture-photo-counter span,
+  .studio-top-info h1,.studio-top-info p,.studio-panel-header h3,.studio-panel-header span,.studio-filter-scope,
+  .photobooth-final-preview>.template-panel-header h2,.photobooth-final-preview>.template-panel-header span,
+  .photobooth-drive-card>.template-panel-header h2,.photobooth-drive-card>.template-panel-header span,
+  .photobooth-delivery-status strong,.photobooth-delivery-status span,
+  .step-footer>div>strong,.step-footer>div>span,.capture-review-actions>span,.app-status){
+  color:#fff;
+  text-shadow:-1px -1px 1px #000c,1px 1px 1px #000c,0 2px 4px #000;
+  font-weight:650;
+}
+.app.booth-active :is(.start-copy p,.oto-step2-header p,.strip-carousel-meta,.step2-footer-info){font-size:16px;line-height:1.5}
+.app.booth-active .app-brand img{filter:drop-shadow(0 1px 2px #0009)}
+.app.booth-active .strip-carousel{box-sizing:border-box}
+.app.booth-active .strip-carousel-card{opacity:1;align-self:stretch;box-sizing:border-box;max-height:100%;min-height:0}
+.app.booth-active .strip-carousel-card.is-selected{transform:scale(1)}
+.app.booth-active .strip-carousel-artboard{flex:1;min-height:0;height:auto}
+.app.booth-active :is(.strip-card-top-bar,.strip-card-info){flex-shrink:0}

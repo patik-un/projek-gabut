@@ -1,0 +1,7 @@
+# Photobooth text and transparent strip picker — 17 November 2026
+
+Reproduced actual photobooth UI at 1280×720, Floral background with dim 0. Remaining strip-picker container used an opaque radial gradient even though its cards were transparent. Instructions used rgb(148,163,184), metadata rgb(157,163,175), and unselected cards had opacity .55. Names/metadata were vertically clipped by the fixed available carousel height.
+
+Fix scoped to active photobooth CSS: transparent strip-picker wrapper; white foreground and dark text edge/shadow on menu text, 16px instructions/metadata, full-opacity cards, and bounded card/artboard flex layout that leaves room for titles. Selected outline and tag remain; original strip artboards and uploaded image pixels remain unchanged. Menu buttons and QR colors remain independent.
+
+Browser validation using actual App JSX/CSS with synthetic operator and disabled physical camera: wrapper background rgba(0,0,0,0), background-image none; all three cards opacity 1; all three title/info rectangles fit vertically within carousel. Next-template button selected Strip 2 Pose; selected card background remained transparent. Start-page subtitle computed white and its card remained transparent. Screenshot: photobooth-readable-transparent-strip-picker.png in conversation visualization directory. Production Vite build passed (124 modules); git diff --check passed. Temporary fixtures and server removed. No new installer or release published.
