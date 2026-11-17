@@ -3854,7 +3854,7 @@ const hasMovedCarouselRef = useRef(false);
       setStripDecorations((prev) =>
         prev.map((s) =>
           s.id === id
-            ? { ...s, scale: Math.max(0.4, Math.min(2.8, Math.round(((s.scale || 1) + delta) * 10) / 10)) }
+            ? { ...s, scale: Math.max(0.4, Math.min(2.8, Math.round(((s.scale || 1) + delta) * 100) / 100)) }
             : s
         )
       );
@@ -8080,7 +8080,7 @@ const hasMovedCarouselRef = useRef(false);
                             <button key={`sticker-${item.id}`} type="button" className="studio-sticker-btn"
                               aria-label={`Tambahkan stiker ${item.name}`}
                               onClick={() => handleAddSticker(item.content, item.kind, item.id)}>
-                              <DecorationArtwork item={item} type="sticker" />
+                              <span className="studio-sticker-thumb"><DecorationArtwork item={item} type="sticker" /></span>
                             </button>
                           ))}
                           {publishedEditorItems.texts.map((item) => (

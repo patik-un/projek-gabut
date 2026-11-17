@@ -96,3 +96,15 @@ test("right-click never starts a transform", () => {
   assert.equal(f.changes.length, 0);
   assert.equal(f.captures.size, 0);
 });
+
+test('shrinking past the center stays at the minimum instead of jumping larger again',()=>{
+  const center={x:100,y:100},start={x:140,y:140};
+  for(const factor of [0,-.25,-1,-3]){
+    const point={x:100+40*factor,y:100+40*factor};
+    assert.equal(transformSticker({scale:1},'resize',center,start,point).scale,.4);
+  }
+});
+test('sideways pointer motion does not unexpectedly enlarge a small sticker',()=>{
+  const center={x:0,y:0},start={x:32,y:0};
+  assert.equal(transformSticker({scale:.5},'resize',center,start,{x:32,y:50}).scale,.5);
+});

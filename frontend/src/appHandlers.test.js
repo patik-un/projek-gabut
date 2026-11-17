@@ -1002,3 +1002,18 @@ test('Oto retake restarts configured countdown at the session photo limit and re
   assert.equal(requests.length,1);assert.equal(requests[0].replace_filename,'last.jpg');
   assert.equal(context.captureReviewAttempts,1);assert.equal(context.showResult,true);
 });
+
+test('sticker size buttons use even 15 percent steps without moving the item',()=>{
+  const context=sessionContext();
+  context.selectedDecoration={type:'sticker',id:'one'};
+  context.stripDecorations=[{id:'one',scale:1,x:50,y:45},{id:'other',scale:1,x:10,y:10}];
+  const resize=appHandler('updateSelectedDecorationScale',context);
+  for(const scale of [.85,.7,.55,.4]){
+    resize(-.15);
+    assert.equal(context.stripDecorations[0].scale,scale);
+    assert.equal(context.stripDecorations[0].x,50);assert.equal(context.stripDecorations[0].y,45);
+    assert.equal(context.stripDecorations[1].scale,1);
+  }
+  resize(-.15);assert.equal(context.stripDecorations[0].scale,.4);
+  resize(.15);assert.equal(context.stripDecorations[0].scale,.55);
+});

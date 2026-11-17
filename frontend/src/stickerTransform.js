@@ -13,10 +13,15 @@ export function transformSticker(item, mode, center, start, point) {
   if (![center.x, center.y, start.x, start.y, point.x, point.y].every(Number.isFinite)) return {};
   const dx = start.x - center.x, dy = start.y - center.y;
   const distance = Math.hypot(dx, dy);
-  if (distance < 1) return {};
+  if (!Number.isFinite(distance) || distance < 1) return {};
   if (mode === "resize") {
     const scale = Number.isFinite(item.scale) ? item.scale : 1;
-    return { scale: clamp(scale * Math.hypot(point.x - center.x, point.y - center.y) / distance, 0.4, 2.8) };
+    // Signed motion along the original handle direction: crossing the center
+    // must keep shrinking, and sideways motion must not enlarge the sticker.
+    const ratio = ((point.x - center.x) / distance) * (dx / distance)
+      + ((point.y - center.y) / distance) * (dy / distance);
+    if (!Number.isFinite(ratio)) return {};
+    return { scale: clamp(scale * ratio, 0.4, 2.8) };
   }
   if (mode === "rotate") {
     const delta = Math.atan2(point.y - center.y, point.x - center.x) - Math.atan2(dy, dx);
