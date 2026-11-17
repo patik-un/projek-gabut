@@ -254,6 +254,14 @@ fn configure_backend_process(command: &mut StdCommand) {
     }
 }
 
+fn configure_backend_parent(command: &mut StdCommand, debug_backend: bool) {
+    // Onefile packages may run Python under a bootloader, not directly under Tauri.
+    command.env_remove("EVENT_BOOTH_PARENT_PID");
+    if debug_backend {
+        command.env("EVENT_BOOTH_PARENT_PID", std::process::id().to_string());
+    }
+}
+
 fn spawn_backend(state: &BackendProcess) -> Result<std::process::Child, String> {
     let mut command = StdCommand::new(&state.executable_path);
     if state.debug_backend {
@@ -273,6 +281,7 @@ fn spawn_backend(state: &BackendProcess) -> Result<std::process::Child, String> 
         }
     }
 
+    configure_backend_parent(&mut command, state.debug_backend);
     configure_backend_process(&mut command);
 
     command
@@ -486,11 +495,23 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_dir_missing, secure_backend_auth_data};
+    use super::{configure_backend_parent, merge_dir_missing, secure_backend_auth_data};
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parent_guard_is_only_set_for_direct_dev_python() {
+        let mut command = std::process::Command::new("unused-test-command");
+        command.env("EVENT_BOOTH_PARENT_PID", "inherited-stale-pid");
+        configure_backend_parent(&mut command, false);
+        let parent = command.get_envs().find(|(key, _)| *key == "EVENT_BOOTH_PARENT_PID").unwrap().1;
+        assert!(parent.is_none(), "packaged onefile runtime must not compare bootloader parent to Tauri");
+        configure_backend_parent(&mut command, true);
+        let parent = command.get_envs().find(|(key, _)| *key == "EVENT_BOOTH_PARENT_PID").unwrap().1.unwrap();
+        assert_eq!(parent, std::process::id().to_string().as_str());
+    }
 
     #[cfg(windows)]
     #[test]

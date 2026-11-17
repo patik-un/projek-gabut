@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { googleLogout } from "@react-oauth/google";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { isDriveAuthReady, runDriveLogin } from "./driveAuth.js";
 import { requestBackendJson } from "./backendRequest.js";
 import PhotoboothEditorAdmin from "./PhotoboothEditorAdmin.jsx";
@@ -2439,12 +2439,13 @@ const hasMovedCarouselRef = useRef(false);
     backendReadyRef.current = false;
     setBackendReady(false);
 
-    const markDisconnected = () => {
+    const sessionMismatchMessage = "Backend dari sesi aplikasi lain masih aktif. Tutup aplikasi lama lalu coba lagi.";
+    const markDisconnected = (message = "Menunggu kamera...") => {
       if (!isMounted) return;
       cancelDataRequest?.();
       backendReadyRef.current = false;
       setBackendReady(false);
-      setStatus("Menunggu kamera...");
+      setStatus(message);
     };
 
     const refreshData = async (loaders) => {
@@ -2497,7 +2498,7 @@ const hasMovedCarouselRef = useRef(false);
       let requestTimer = null;
       try {
         const response = await Promise.race([
-          Promise.resolve().then(() => fetch(`${API_URL}/`, {
+          Promise.resolve().then(() => fetch(`${API_URL}/system/health`, {
             cache: "no-store",
             signal: controller.signal,
           })),
@@ -2534,7 +2535,7 @@ const hasMovedCarouselRef = useRef(false);
             backendReadyRef.current = true;
             setBackendReady(true);
             setStatus((current) =>
-              current === "Menunggu kamera..." ? "" : current
+              current === "Menunggu kamera..." || current === sessionMismatchMessage ? "" : current
             );
           } else {
             // For non-admin users (oto mode), still set backendReady to true
@@ -2544,12 +2545,12 @@ const hasMovedCarouselRef = useRef(false);
               backendReadyRef.current = true;
               setBackendReady(true);
               setStatus((current) =>
-                current === "Menunggu kamera..." ? "" : current
+                current === "Menunggu kamera..." || current === sessionMismatchMessage ? "" : current
               );
             }
           }
         } else {
-          markDisconnected();
+          markDisconnected(response.status === 401 ? sessionMismatchMessage : undefined);
         }
       } catch {
         markDisconnected();
@@ -6247,7 +6248,7 @@ const hasMovedCarouselRef = useRef(false);
     ]);
 
     try {
-      const backendResponse = await fetch(`${API_URL}/`, {
+      const backendResponse = await fetch(`${API_URL}/system/health`, {
         cache: "no-store",
       });
 
@@ -6473,9 +6474,7 @@ const hasMovedCarouselRef = useRef(false);
       const connection = await runDriveLogin({
         apiUrl: API_URL,
         signal: controller.signal,
-        startBackend: () => invoke("start_backend").catch((error) =>
-          console.warn("Start backend warning:", error)
-        ),
+        startBackend: isTauri() ? () => invoke("start_backend") : undefined,
         onWaiting: () => setStatus("Silakan selesaikan login di browser..."),
         onValidating: () => setStatus("Token terdeteksi! Memvalidasi..."),
       });

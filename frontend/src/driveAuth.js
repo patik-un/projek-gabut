@@ -123,12 +123,15 @@ export async function runDriveLogin({
       let serverReady = false;
       while (!serverReady) {
         try {
-          const health = await step((requestSignal) => fetchImpl(`${apiUrl}/`, {
+          const health = await step((requestSignal) => fetchImpl(`${apiUrl}/system/health`, {
             cache: "no-store",
             signal: requestSignal,
           }), 1000);
+          if (health.status === 401) throw authError("BackendSessionError",
+            "Backend dari sesi aplikasi lain masih aktif. Tutup aplikasi lama lalu coba lagi.");
           serverReady = health.ok;
-        } catch {
+        } catch (error) {
+          if (error.name === "BackendSessionError") throw error;
           checkActive();
         }
         if (!serverReady) await pause(1000);

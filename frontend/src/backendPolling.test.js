@@ -415,3 +415,16 @@ test("output initialization forwards cancellation into its fallback settings sav
   await loading;
   assert.equal(context.outputSettingsLoadedRef.current, false);
 });
+
+test('readiness checks instance authentication before loading protected data', async () => {
+  const urls=[];
+  const app=harness({fetch:async url=>{urls.push(url);return url.endsWith('/system/health')?{ok:false,status:401}:{ok:true};}});
+  const cleanup=app.start();
+  try {
+    await flush();
+    assert.equal(app.state.ready,false);
+    assert.equal(app.calls.loadCaptures,0);
+    assert.match(app.state.status,/sesi/i);
+    assert.deepEqual(urls,['http://127.0.0.1:8000/system/health']);
+  } finally {cleanup();}
+});

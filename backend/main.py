@@ -15,6 +15,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from detect.detect import start_detector
 from queue_db import start_upload_worker
 from api.server import app as fastapi_app
+from parent_guard import managed_parent_alive
 
 
 system_running = True
@@ -105,6 +106,9 @@ def main():
     global system_running
     from instance_lock import acquire_instance_lock
     from runtime_paths import get_backend_dir
+    parent_pid = os.environ.get("EVENT_BOOTH_PARENT_PID")
+    if not managed_parent_alive(parent_pid):
+        raise RuntimeError("Proses aplikasi induk sudah berhenti")
     instance_lock = acquire_instance_lock(get_backend_dir(__file__))
     from queue_db import cancel_app_update
     cancel_app_update()
@@ -129,6 +133,9 @@ def main():
 
     try:
         while system_running:
+            if not managed_parent_alive(parent_pid):
+                print("🛑 Aplikasi induk berhenti; menutup backend sesi ini...")
+                break
             time.sleep(1)
 
     except Exception as e:

@@ -219,10 +219,19 @@ test("backend preparation is cancellable and cannot start login after logout", a
 
 test("backend health checks expire without ever triggering OAuth", async () => {
   await assert.rejects(runDriveLogin(flowOptions(async (url) => {
-    assert.equal(url, `${API_URL}/`);
+    assert.equal(url, `${API_URL}/system/health`);
     return { ok: false };
   }, {
     startBackend: async () => {},
     backendTimeoutMs: 50,
   })), { name: "TimeoutError" });
+});
+
+test('another native session is rejected before OAuth and does not wait for timeout', async () => {
+  const calls = [];
+  await assert.rejects(runDriveLogin(flowOptions(async url => {
+    calls.push(url);
+    return {ok:false,status:401};
+  }, {startBackend:async()=>{}})), error => error.name === 'BackendSessionError' && /sesi/i.test(error.message));
+  assert.deepEqual(calls,[`${API_URL}/system/health`]);
 });

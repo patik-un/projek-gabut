@@ -650,6 +650,12 @@ def trigger_drive_login():
 
     return {"success": True, "message": "Proses login telah dimulai. Silakan cek browser Anda."}
 
+@app.get("/system/health")
+def authenticated_health():
+    # Unlike the public liveness probe, middleware validates the native token.
+    return {"status": "running"}
+
+
 @app.get("/")
 def root():
 

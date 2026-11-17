@@ -73,6 +73,17 @@ class LocalApiTest(unittest.IsolatedAsyncioTestCase):
         cls.environment.stop()
         cls.directory.cleanup()
 
+    async def test_session_health_only_accepts_the_native_instance_token(self):
+        with patch.dict(os.environ, {"EVENT_BOOTH_API_TOKEN": "current-session"}):
+            for token, expected in [(None, 401), ("old-session", 401), ("current-session", 200)]:
+                headers = [(b"x-event-booth-token", token.encode())] if token else []
+                status, _, body = await request_app(self.server.app, "GET", "/system/health", headers=headers)
+                self.assertEqual(status, expected)
+                if status == 200:
+                    self.assertEqual(json.loads(body)["status"], "running")
+            status, _, _ = await request_app(self.server.app, "GET", "/")
+            self.assertEqual(status, 200, "public liveness probe remains available")
+
     async def test_retake_replaces_latest_photo_at_session_limit(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(self.server, "OUTPUT_DIR", folder):
             old = Path(folder, "capture_old.jpg")
