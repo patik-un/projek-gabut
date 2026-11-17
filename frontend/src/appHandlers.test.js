@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
 import vm from "node:vm";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { requestBackendJson } from "./backendRequest.js";
 import { resolveEditorText, resolveEditorTextItem } from "./photoboothEditor.js";
 import { decorationStyle } from "./decorationArtwork.js";
@@ -957,4 +959,46 @@ test('admin retake prohibition and retry limit prevent starting another retake',
     assert.equal(context.retakeTarget,null);
     assert.equal(context.showResult,true);
   }
+});
+
+test('live camera remains mounted while showing the captured photo for review', () => {
+  let frame;
+  const visit = node => {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'capture-camera-frame')) frame = node;
+    for (const [key,value] of Object.entries(node)) if (key !== 'loc') {
+      if (Array.isArray(value)) value.forEach(visit); else if (value && typeof value === 'object') visit(value);
+    }
+  };
+  visit(app);
+  assert.ok(frame);
+  const {transformSync}=require('esbuild');
+  const code=transformSync(`(${source.slice(frame.start,frame.end)})`,{loader:'jsx',jsxFactory:'React.createElement',jsxFragment:'React.Fragment'}).code;
+  const context={React,showResult:true,latestCapture:{image_url:'http://test/photo.jpg',filename:'photo.jpg'},streamVersion:1,
+    attachCameraVideoElement(){},cameraPreviewSource:'browser',handleBrowserCameraReady(){},handleBackendCameraLoad(){},handleBackendCameraError(){},
+    backendReady:true,API_URL:'http://test',cameraActive:true,captures:[{}],photoboothCaptureCount:1,retakeTarget:null,
+    autoCaptureReady:false,autoCaptureCountdown:null};
+  const html=renderToStaticMarkup(vm.runInNewContext(code,context));
+  assert.match(html,/<video/,'review must not detach the playing camera and reset readiness');
+  assert.match(html,/capture-result-photo/);
+});
+
+test('Oto retake restarts configured countdown at the session photo limit and replaces that photo', async () => {
+  const context=autoCaptureContext({showResult:true,captures:[{filename:'last.jpg'}],captureReviewAttempts:0,
+    captureReviewSettings:{enabled:true,seconds:5,allowRetake:true,maxRetakes:1},cameraProvider:'webcam',captureBrowserCameraFrame:()=> 'frame',
+    sessionTiming:{initialCountdown:7,nextCountdown:3},autoCaptureReadyRef:{current:null},autoCaptureTimeoutRef:{current:null},autoCaptureCountdownRef:{current:null},
+    PHOTOBOOTH_INITIAL_READY_MS:1500,PHOTOBOOTH_NEXT_READY_MS:1500});
+  const timeouts=[],intervals=[],requests=[];
+  context.window={setTimeout(callback,delay){timeouts.push({callback,delay});return timeouts.length;},clearTimeout(){},setInterval(callback){intervals.push(callback);return intervals.length;},clearInterval(){}};
+  context.fetch=async (_url,options)=>{requests.push(JSON.parse(options.body));return {ok:true,json:async()=>({success:true})};};
+  context.handleCapture=appHandler('handleCapture',context);
+  appHandler('retakeCaptureReview',context)();
+  assert.equal(context.retakeTarget,'last.jpg');assert.equal(context.showResult,false);
+  appEffect('const nextStepTimer',context)();
+  assert.equal(context.autoCaptureReady,true);assert.equal(timeouts[0].delay,1500);
+  timeouts[0].callback();assert.equal(context.autoCaptureCountdown,3);
+  intervals[0]();assert.equal(context.autoCaptureCountdown,2);
+  timeouts[1].callback();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(requests.length,1);assert.equal(requests[0].replace_filename,'last.jpg');
+  assert.equal(context.captureReviewAttempts,1);assert.equal(context.showResult,true);
 });

@@ -9,6 +9,7 @@ import { createTextArtwork, createStickerArtwork, decorationStyle } from "./deco
 import DecorationArtwork from "./DecorationArtwork.jsx";
 import StickerTransformControls from "./StickerTransformControls.jsx";
 import PhotoboothGifResults from "./PhotoboothGifResults.jsx";
+import BoothStatusToast from './BoothStatusToast.jsx';
 import PhotoboothQrCode from "./PhotoboothQrCode.jsx";
 import { animatedStripOverlays, photoGifFrames, requestGifAssets } from "./photoboothGif.js";
 import sisikitaCompanyLogo from "./assets/sisikita-company-logo.png";
@@ -3245,6 +3246,12 @@ const hasMovedCarouselRef = useRef(false);
     clearAutoCaptureTimers();
     setRetakeTarget(captures[0].filename);
     setShowResult(false);
+    setAutoCaptureCountdown(null);
+    setAutoCaptureReady(false);
+    setAutoCaptureLabel("Menyiapkan ulang foto");
+    setStatus(photoboothAdminSettings.mode === 'admin'
+      ? "Atur posisi, lalu tekan Ambil Foto untuk mengulang."
+      : "Atur posisi, foto diulang setelah hitungan mundur.");
     setCaptureReviewRemaining(0);
   };
 
@@ -7524,9 +7531,11 @@ const hasMovedCarouselRef = useRef(false);
                     </div>
                     <div className="capture-photo-counter">
                       <strong>
-                        {captures.length >= photoboothCaptureCount
-                          ? "Selesai"
-                          : `${captures.length + 1}`}
+                        {retakeTarget || showResult
+                          ? `${captures.length}`
+                          : captures.length >= photoboothCaptureCount
+                            ? "Selesai"
+                            : `${captures.length + 1}`}
                       </strong>
                       <span>/ {photoboothCaptureCount}</span>
                     </div>
@@ -7628,39 +7637,36 @@ const hasMovedCarouselRef = useRef(false);
                       </div>
                     </div>
                     <div className="capture-camera-frame">
-                      {showResult && latestCapture ? (
+                      <video
+                        ref={attachCameraVideoElement}
+                        className={`capture-live-camera ${cameraPreviewSource === "backend" ? "camera-preview-hidden" : ""}`}
+                        autoPlay
+                        playsInline
+                        muted
+                        aria-hidden={showResult}
+                        onCanPlay={handleBrowserCameraReady}
+                        onLoadedData={handleBrowserCameraReady}
+                        onPlaying={handleBrowserCameraReady}
+                      />
+                      {backendReady && cameraPreviewSource !== "browser" && (
+                        <img
+                          className="capture-live-camera"
+                          src={`${API_URL}/camera-stream?v=${streamVersion}`}
+                          alt=""
+                          aria-hidden={showResult}
+                          onLoad={handleBackendCameraLoad}
+                          onError={handleBackendCameraError}
+                        />
+                      )}
+                      {!cameraActive && !showResult && (
+                        <div className="capture-camera-empty">Kamera belum aktif</div>
+                      )}
+                      {showResult && latestCapture && (
                         <img
                           className="capture-result-photo"
                           src={`${latestCapture.image_url}?v=${streamVersion}`}
                           alt={latestCapture.filename}
                         />
-                      ) : (
-                        <>
-                          <video
-                            ref={attachCameraVideoElement}
-                            className={`capture-live-camera ${
-                              cameraPreviewSource === "backend" ? "camera-preview-hidden" : ""
-                            }`}
-                            autoPlay
-                            playsInline
-                            muted
-                            onCanPlay={handleBrowserCameraReady}
-                            onLoadedData={handleBrowserCameraReady}
-                            onPlaying={handleBrowserCameraReady}
-                          />
-                          {backendReady && cameraPreviewSource !== "browser" && (
-                            <img
-                              className="capture-live-camera"
-                              src={`${API_URL}/camera-stream?v=${streamVersion}`}
-                              alt=""
-                              onLoad={handleBackendCameraLoad}
-                              onError={handleBackendCameraError}
-                            />
-                          )}
-                          {!cameraActive && (
-                            <div className="capture-camera-empty">Kamera belum aktif</div>
-                          )}
-                        </>
                       )}
                       {!showResult && (retakeTarget || captures.length < photoboothCaptureCount) && (
                         <div className="capture-center-status">
@@ -10720,7 +10726,9 @@ onPointerMove={onEditCropPointerMove}
           </div>
         )}
 
-      {status && <div className="app-status">{status}</div>}
+      {activeView === 'photobooth'
+        ? <BoothStatusToast message={status} fullscreen={boothFullscreen.fullscreen} />
+        : status && <div className="app-status">{status}</div>}
     </div>
   );
 }

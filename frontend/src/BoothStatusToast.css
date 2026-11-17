@@ -1,0 +1,6 @@
+.booth-status-toast{position:fixed;top:max(88px,env(safe-area-inset-top));right:max(20px,env(safe-area-inset-right));z-index:12000;display:flex;align-items:flex-start;gap:16px;box-sizing:border-box;width:max-content;max-width:min(420px,calc(100vw - 40px));padding:14px 16px;border:1px solid #ffffff30;border-radius:12px;background:#171a20f5;color:#fff;box-shadow:0 8px 28px #0004;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.booth-status-toast.is-fullscreen{top:max(20px,env(safe-area-inset-top))}
+.booth-status-toast>span{flex:1;min-width:0}
+.booth-status-toast>button{flex:none;display:grid;place-items:center;width:28px;height:28px;padding:0;border:1px solid #ffffff35;border-radius:6px;background:transparent;color:#fff;font:inherit;font-size:21px;line-height:1;cursor:pointer}
+.booth-status-toast>button:hover{background:#ffffff18}
+.booth-status-toast>button:focus-visible{outline:2px solid #fff;outline-offset:3px}
