@@ -17,7 +17,7 @@
 .booth-appearance-fields:disabled{opacity:.6}
 .booth-appearance-preview{position:relative;display:grid;place-items:center;min-height:240px;aspect-ratio:16/10;border-radius:12px;overflow:hidden;background-image:var(--booth-background);background-size:cover;background-position:center;isolation:isolate;border:1px solid var(--line-soft)}
 .booth-preview-dim{position:absolute;inset:0;background:#000;opacity:var(--booth-dim-opacity)}
-.booth-preview-card{position:relative;display:flex;flex-direction:column;align-items:center;gap:16px;text-align:center;width:75%;max-width:300px;padding:24px 18px;border:1px solid #ffffff30;border-radius:16px;background:#101216c9;color:#fff;box-shadow:0 10px 35px #0003}
+.booth-preview-card{position:relative;display:flex;flex-direction:column;align-items:center;gap:16px;text-align:center;width:75%;max-width:300px;padding:24px 18px;border:1px solid transparent;border-radius:16px;background:transparent;color:#fff;box-shadow:none;text-shadow:0 1px 3px #000,0 0 8px #0009}
 .booth-preview-card>span:first-child{font-size:9px;letter-spacing:2px;color:#e8d9bc}
 .booth-preview-card>strong{font-family:Georgia,serif;font-size:25px;line-height:1.2;font-weight:400}
 .booth-preview-button{border-radius:8px;font-size:11px;padding:9px 24px;background:#e8d9bc;color:#352c20}
@@ -26,14 +26,31 @@
 .booth-backdrop{position:absolute;inset:0;z-index:-1;pointer-events:none;background-image:var(--booth-background);background-size:cover;background-position:center}
 .booth-backdrop-dim{position:absolute;inset:0;background:#000;opacity:var(--booth-dim-opacity);pointer-events:none}
 .booth-themed .photobooth-view,.booth-themed .photobooth-wizard,.booth-themed .step-panel{background:transparent}
-.booth-themed .start-card,.booth-themed .oto-step2-header,.booth-themed .photobooth-final-preview{background:rgba(15,17,20,.48);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid #ffffff30;border-radius:16px;color:#fff}
-.booth-themed .booth-mode-tools{background:#111316d9}
-.booth-themed .capture-strip-header,.booth-themed .step-footer,.booth-themed .studio-top-bar,.booth-themed .oto-step2-footer-bar{background:rgba(15,17,20,.5);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid #ffffff30;border-radius:12px;padding:12px 16px;color:#fff}
-.booth-themed .app-status{background:rgba(15,17,20,.94);color:#fff;border-radius:8px;padding:8px 12px}
+.booth-themed .start-card,.booth-themed .oto-step2-header,.booth-themed .photobooth-final-preview{border:1px solid transparent;border-radius:16px;color:#fff}
+.booth-themed .capture-strip-header,.booth-themed .step-footer,.booth-themed .studio-top-bar,.booth-themed .oto-step2-footer-bar{border:1px solid transparent;border-radius:12px;padding:12px 16px;color:#fff}
+.booth-themed .app-status{color:#fff;border-radius:8px;padding:8px 12px}
 .booth-themed .photobooth-step2-panel::before,.booth-themed .photobooth-start-panel::before{background:none}
 @media(max-width:850px){.booth-appearance-bottom{grid-template-columns:1fr}.booth-appearance-preview{aspect-ratio:16/9}.booth-theme-choices{grid-template-columns:repeat(2,minmax(0,1fr))}}
 
 .booth-themed .studio-simple .studio-canvas-area{background:transparent}
-.booth-themed .studio-simple .studio-dock,.booth-themed .capture-review-actions{background:rgba(15,17,20,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 .booth-themed .capture-session-copy,.booth-themed .studio-top-info,.booth-themed .start-card{text-shadow:0 1px 3px #0009}
 .booth-themed .capture-session-copy span,.booth-themed .capture-photo-counter span{color:#f1f1f1}
+
+/* Menu containers reveal the booth backdrop; photo, strip and QR canvases keep their own surfaces. */
+.app.booth-active :is(.topbar,.tabs,.photobooth-view,.photobooth-wizard,.step-panel,
+  .start-card,.oto-step2-header,.oto-config-card,.oto-step2-preview-panel,.selected-strip-mockup,
+  .booth-mode-tools,.capture-strip-header,.step-footer,.capture-review-actions,
+  .studio-top-bar,.studio-canvas-area,.studio-dock,.studio-selection-toolbar,.oto-step2-footer-bar,
+  .photobooth-final-preview,.photobooth-drive-card,.photobooth-delivery-status,.app-status){
+  background:transparent;
+  border-color:transparent;
+  box-shadow:none;
+  backdrop-filter:none;
+  -webkit-backdrop-filter:none;
+}
+.app.booth-active :is(.photobooth-step2-panel,.photobooth-start-panel)::before{background:none}
+.app.booth-active .strip-carousel-card{background:transparent;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none}
+.app.booth-active :is(.start-copy,.oto-step2-header,.capture-session-copy,.capture-photo-counter,
+  .studio-top-info,.step-footer,.capture-review-actions>span,.drive-result-copy,.app-status){
+  text-shadow:0 1px 3px #000,0 0 8px #0009;
+}
