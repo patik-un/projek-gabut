@@ -3,13 +3,17 @@ $ErrorActionPreference = 'Stop'
 function Install-Release {
     param([string]$Version, [string]$Sha256, [string]$Mode)
 
-    $name = "Event.Booth.Studio_${Version}_x64-setup.exe"
-    $file = Join-Path $env:RUNNER_TEMP $name
-    $url = "https://github.com/patik-un/projek-gabut/releases/download/v$Version/$name"
-    curl.exe --fail --location --retry 3 --silent --show-error --output $file $url
-    if ($LASTEXITCODE -ne 0) { throw "Download failed for $name with curl exit code $LASTEXITCODE" }
-    if ((Get-FileHash $file -Algorithm SHA256).Hash -ne $Sha256) {
-        throw "SHA256 mismatch for $name"
+    if ($Version -eq $env:CANDIDATE_VERSION -and $env:CANDIDATE_INSTALLER) {
+        $file = $env:CANDIDATE_INSTALLER
+    } else {
+        $name = "Event.Booth.Studio_${Version}_x64-setup.exe"
+        $file = Join-Path $env:RUNNER_TEMP $name
+        $url = "https://github.com/patik-un/projek-gabut/releases/download/v$Version/$name"
+        curl.exe --fail --location --retry 3 --silent --show-error --output $file $url
+        if ($LASTEXITCODE -ne 0) { throw "Download failed for $name with curl exit code $LASTEXITCODE" }
+        if ((Get-FileHash $file -Algorithm SHA256).Hash -ne $Sha256) {
+            throw "SHA256 mismatch for $name"
+        }
     }
     Write-Host "Installer $Version Authenticode status $((Get-AuthenticodeSignature $file).Status)"
     $process = Start-Process -FilePath $file -ArgumentList $Mode -PassThru
@@ -35,7 +39,7 @@ function Install-Release {
 }
 
 try {
-    if ($env:INSTALL_PATH -eq 'upgrade') {
+    if ($env:INSTALL_PATH -eq 'upgrade' -or $env:CANDIDATE_INSTALLER) {
         $root = Install-Release '0.1.8' 'f349b8e5e3718491bfca5c4cd4f847dfcc2da5d91f53e4c645db5be735c9a42c' '/S'
         $env:EVENT_BOOTH_BACKEND_DATA_DIR = Join-Path $env:RUNNER_TEMP 'test-data'
         $env:EVENT_BOOTH_API_TOKEN = [guid]::NewGuid().ToString('N')
@@ -55,7 +59,11 @@ try {
             }
             if (!$ready) { throw 'Packaged backend never started' }
             Write-Host "Reproducing upgrade with backend PID $($backend.Id) still running"
-            $null = Install-Release '0.1.9' 'b0b0643285b8ad5ac6e33f1f6b5044be0a467c9634498fac3635702627b63721' '/S /UPDATE'
+            if ($env:CANDIDATE_INSTALLER) {
+                $null = Install-Release $env:CANDIDATE_VERSION '' '/S /UPDATE'
+            } else {
+                $null = Install-Release '0.1.9' 'b0b0643285b8ad5ac6e33f1f6b5044be0a467c9634498fac3635702627b63721' '/S /UPDATE'
+            }
             $newDigest = (Get-FileHash $backendPath -Algorithm SHA256).Hash
             if (!$backend.HasExited -or $newDigest -eq $oldDigest) {
                 throw "Installer registered the upgrade while the previous backend still occupied the destination. Backend exited: $($backend.HasExited). Backend replaced: $($newDigest -ne $oldDigest)."

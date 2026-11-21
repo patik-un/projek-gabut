@@ -7,6 +7,10 @@ on:
         description: Test clean install and upgrade using the published installers
         type: boolean
         default: false
+      test_backend_upgrade:
+        description: Verify this build replaces the backend from a previous installation
+        type: boolean
+        default: false
       upload_logs:
         description: Upload build logs
         type: boolean
@@ -118,6 +122,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
+
+      - name: Verify installer replaces an orphaned backend
+        if: ${{ inputs.test_backend_upgrade }}
+        shell: pwsh
+        run: |
+          $env:CANDIDATE_VERSION = (Get-Content frontend/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $installer = Get-ChildItem frontend/src-tauri/target/release/bundle/nsis -Filter ('*_{0}_x64-setup.exe' -f $env:CANDIDATE_VERSION) | Select-Object -First 1
+          if (!$installer) { throw 'Expected release installer not found' }
+          $env:CANDIDATE_INSTALLER = $installer.FullName
+          ./frontend/scripts/diagnose-windows-installer.ps1
 
       - name: Run native Windows regression tests
         working-directory: frontend/src-tauri
