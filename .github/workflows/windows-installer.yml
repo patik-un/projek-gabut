@@ -3,6 +3,10 @@ name: Build Windows Installer
 on:
   workflow_dispatch:
     inputs:
+      verify_published_installer:
+        description: Test clean install and upgrade using the published installers
+        type: boolean
+        default: false
       upload_logs:
         description: Upload build logs
         type: boolean
@@ -20,10 +24,27 @@ permissions:
   contents: read
 
 jobs:
+  verify-published-installer:
+    name: Test published installer on Windows
+    runs-on: windows-latest
+    timeout-minutes: 12
+    if: ${{ inputs.verify_published_installer }}
+    strategy:
+      fail-fast: false
+      matrix:
+        install_path: [fresh, upgrade]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install published release
+        shell: pwsh
+        env:
+          INSTALL_PATH: ${{ matrix.install_path }}
+        run: ./frontend/scripts/diagnose-windows-installer.ps1
+
   build-windows-installer:
     name: Build NSIS installer
     runs-on: windows-latest
-    if: ${{ !inputs.signed_release }}
+    if: ${{ !inputs.signed_release && !inputs.verify_published_installer }}
 
     steps:
       - name: Checkout repository
