@@ -41,7 +41,9 @@ try {
         $env:EVENT_BOOTH_API_TOKEN = [guid]::NewGuid().ToString('N')
         $env:EVENT_BOOTH_BACKEND_PORT = '18080'
         New-Item -ItemType Directory $env:EVENT_BOOTH_BACKEND_DATA_DIR | Out-Null
-        $backend = Start-Process (Join-Path $root 'backend-bin\event-booth-backend.exe') -PassThru
+        $backendPath = Join-Path $root 'backend-bin\event-booth-backend.exe'
+        $oldDigest = (Get-FileHash $backendPath -Algorithm SHA256).Hash
+        $backend = Start-Process $backendPath -PassThru
         try {
             $ready = $false
             for ($attempt = 0; $attempt -lt 25; $attempt++) {
@@ -54,6 +56,10 @@ try {
             if (!$ready) { throw 'Packaged backend never started' }
             Write-Host "Reproducing upgrade with backend PID $($backend.Id) still running"
             $null = Install-Release '0.1.9' 'b0b0643285b8ad5ac6e33f1f6b5044be0a467c9634498fac3635702627b63721' '/S /UPDATE'
+            $newDigest = (Get-FileHash $backendPath -Algorithm SHA256).Hash
+            if (!$backend.HasExited -or $newDigest -eq $oldDigest) {
+                throw "Installer registered the upgrade while the previous backend still occupied the destination. Backend exited: $($backend.HasExited). Backend replaced: $($newDigest -ne $oldDigest)."
+            }
         } finally {
             if (!$backend.HasExited) { taskkill.exe /F /T /PID $backend.Id | Out-Null }
         }
